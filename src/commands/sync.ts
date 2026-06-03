@@ -2348,6 +2348,85 @@ async function performFullSync(
   };
 }
 
+/**
+ * Grace window (seconds) between the watchdog's SIGTERM and SIGKILL. SIGTERM
+ * gives a responsive loop a clean shutdown; SIGKILL is the starvation backstop.
+ */
+export const HARD_DEADLINE_GRACE_SEC = 30;
+
+export interface HardDeadlineResolution {
+  deadlineMs: number;
+  graceMs: number;
+  /** Where the deadline came from (for the armed-log line + tests). */
+  reason: string;
+}
+
+/**
+ * Resolve the out-of-band hard-deadline for a `gbrain sync` invocation (#1633).
+ * Pure + argv/env-only so it runs BEFORE `connectEngine` (so a connect-phase hang
+ * is also bounded — `timeout-layer-vs-connectengine` learning). DB-plane config
+ * (`gbrain config set`) is unreadable pre-connect, so the operator knob is the
+ * `GBRAIN_SYNC_MAX_RUNTIME_SECONDS` env var; bare cron is covered by the non-TTY
+ * default. Returns null when no watchdog should arm (TTY interactive with no
+ * flag, or an explicit opt-out / 0).
+ *
+ * Precedence: --no-hard-deadline > --hard-deadline > --timeout(non-all) > env >
+ * non-TTY default (3600s) > none.
+ */
+export function resolveSyncHardDeadline(
+  args: string[],
+  opts: { isTty: boolean; env?: Record<string, string | undefined>; defaultNonTtySec?: number },
+): HardDeadlineResolution | null {
+  const env = opts.env ?? {};
+  const graceMs = HARD_DEADLINE_GRACE_SEC * 1000;
+  const mk = (sec: number, reason: string): HardDeadlineResolution | null =>
+    sec > 0 ? { deadlineMs: sec * 1000, graceMs, reason } : null;
+
+  if (args.includes('--no-hard-deadline')) return null;
+
+  const hardStr = args.find((a, i) => args[i - 1] === '--hard-deadline');
+  if (hardStr !== undefined) {
+    // Throws on a bad value (cli.ts surfaces it + exits 1) — same posture as --timeout.
+    const sec = parseDurationSeconds(hardStr, '--hard-deadline');
+    return mk(sec ?? 0, 'flag:--hard-deadline');
+  }
+
+  // --timeout auto-arms a hard backstop at timeout(+grace), but ONLY single-source.
+  // For --all, per-source budgets don't collapse to one wall-clock; fall through.
+  const isAll = args.includes('--all');
+  const timeoutStr = args.find((a, i) => args[i - 1] === '--timeout');
+  if (timeoutStr !== undefined && !isAll) {
+    const sec = parseDurationSeconds(timeoutStr, '--timeout');
+    if (sec && sec > 0) return mk(sec, 'flag:--timeout');
+  }
+
+  const envRaw = env.GBRAIN_SYNC_MAX_RUNTIME_SECONDS;
+  if (envRaw !== undefined && envRaw !== '') {
+    const n = Number(envRaw);
+    if (Number.isFinite(n)) return mk(n, 'env:GBRAIN_SYNC_MAX_RUNTIME_SECONDS'); // n<=0 disables
+  }
+
+  if (!opts.isTty) return mk(opts.defaultNonTtySec ?? 3600, 'default:non-tty');
+
+  return null;
+}
+
+/**
+ * Compose 1..N AbortSignals into one (CQ2). Undefined inputs are dropped; the
+ * result aborts when ANY input aborts. Returns a single signal directly (no
+ * wrapper), `undefined` when nothing is set. Used at both performSync call sites
+ * so the SIGINT graceful-cancel signal and the per-source `--timeout` signal
+ * compose without duplicating `AbortSignal.any` logic.
+ */
+export function composeAbortSignals(
+  ...signals: Array<AbortSignal | undefined>
+): AbortSignal | undefined {
+  const live = signals.filter((s): s is AbortSignal => s !== undefined);
+  if (live.length === 0) return undefined;
+  if (live.length === 1) return live[0];
+  return AbortSignal.any(live);
+}
+
 export async function runSync(engine: BrainEngine, args: string[]) {
   // v0.40 Federated Sync v2: `gbrain sync trigger` subcommand
   // Routes to runSyncTrigger which queues a 'sync' minion job with
@@ -2827,6 +2906,13 @@ See also:
     };
     const perSourceResults: PerSourceResult[] = [];
 
+    // #1633 (Part B): one shared SIGINT controller for the whole --all fan-out.
+    // process-cleanup.ts doesn't own SIGINT, so without this Ctrl-C hard-cuts the
+    // run and can leak per-source locks; here it aborts every in-flight source so
+    // each performSync returns `partial` + releases its lock cleanly.
+    const allInterrupt = new AbortController();
+    const onAllSigint = () => { try { allInterrupt.abort(new Error('SIGINT')); } catch { /* */ } };
+
     const runOne = async (src: typeof sources[number]): Promise<SyncResult> => {
       const cfg = (src.config || {}) as { strategy?: 'markdown' | 'code' | 'auto' };
       // D18: parallel path defers embed; auto-enqueue embed-backfill after.
@@ -2862,7 +2948,7 @@ See also:
         sourceId: src.id,
         strategy: cfg.strategy,
         concurrency,
-        signal: controller?.signal,
+        signal: composeAbortSignals(allInterrupt.signal, controller?.signal),
       };
       // v0.40.6.0 (D6): wrap performSync in withSourcePrefix so every slog /
       // serr line emitted from inside the sync code path gets prefixed with
@@ -2941,6 +3027,8 @@ See also:
       ? Math.min(activeSources.length, maxSources ?? 8)
       : 1;
 
+    process.on('SIGINT', onAllSigint);
+    try {
     if (parallelEligible) {
       const { pMapAllSettled } = await import('../core/parallel.ts');
       const cap = effectiveParallel;
@@ -3013,6 +3101,9 @@ See also:
         }
       }
     }
+    } finally {
+      process.off('SIGINT', onAllSigint);
+    }
 
     const okCount = perSourceResults.filter((r) => r.status === 'ok').length;
     const errCount = perSourceResults.filter((r) => r.status === 'error').length;
@@ -3062,10 +3153,17 @@ See also:
     ? setTimeout(() => singleSourceController!.abort(), timeoutSeconds * 1000)
     : undefined;
   singleSourceTimer?.unref?.();
+  // #1633 (Part B): graceful SIGINT cancel. process-cleanup.ts owns SIGTERM
+  // (lock release + exit) and the watchdog owns the hard deadline; SIGINT is
+  // deliberately left to callers, so Ctrl-C during a long sync aborts the
+  // in-flight import cleanly (performSync returns `partial`, bookmark unadvanced,
+  // lock released by its own finally) instead of a hard cut.
+  const singleSourceInterrupt = new AbortController();
+  const onSingleSourceSigint = () => { try { singleSourceInterrupt.abort(new Error('SIGINT')); } catch { /* */ } };
   const opts: SyncOpts = {
     repoPath, dryRun, full, noPull, noEmbed, noExtract, skipFailed, retryFailed, noSchemaPack, sourceId,
     strategy: strategyArg, concurrency,
-    signal: singleSourceController?.signal,
+    signal: composeAbortSignals(singleSourceInterrupt.signal, singleSourceController?.signal),
   };
 
   // Bug 9 — --retry-failed: before running normal sync, clear acknowledgment
@@ -3086,10 +3184,12 @@ See also:
     // v0.41.13.0 (T6): try/finally clears the single-source timer so it
     // doesn't fire after performSync resolves OR throws.
     let result: SyncResult;
+    process.on('SIGINT', onSingleSourceSigint);
     try {
       result = await performSync(engine, opts);
     } finally {
       if (singleSourceTimer !== undefined) clearTimeout(singleSourceTimer);
+      process.off('SIGINT', onSingleSourceSigint);
     }
     printSyncResult(result);
     // v0.42.7 (#1696, D5): extraction-lag nudge after a completed single-source

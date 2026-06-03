@@ -2420,7 +2420,11 @@ export class PostgresEngine implements BrainEngine {
     params.push(opts.batchSize);
     const limitIdx = params.length;
     const rows = await this.sql.unsafe(
-      `SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at
+      // #1768: project a deterministic full-µs UTC string alongside updated_at.
+      // to_char (not ::text — DateStyle-fragile) so extractStaleFromDB can stamp
+      // links_extracted_at = the exact updated_at and the staleness predicate clears.
+      `SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at,
+              to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_iso
          FROM pages
          WHERE ${where}${afterClause}
          ORDER BY id

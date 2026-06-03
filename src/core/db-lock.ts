@@ -672,6 +672,10 @@ export async function withRefreshingLock<T>(
       }
     })();
   }, refreshIntervalMs);
+  // #1633: don't let the refresh timer keep the process alive on its own. The
+  // finally clearInterval is the primary cleanup; unref is belt-and-suspenders
+  // so a missed clear can't pin the event loop open past real work completion.
+  (interval as unknown as { unref?: () => void }).unref?.();
 
   try {
     return await work();

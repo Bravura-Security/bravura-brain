@@ -1636,7 +1636,12 @@ async function extractStaleFromDB(
       // landing between this SELECT and the stamp advances updated_at past the
       // stamped value, so the page stays stale and re-extracts next run instead
       // of being marked fresh-with-stale-content.
-      processedRefs.push({ slug: page.slug, source_id: page.source_id, extractedAt: page.updated_at.toISOString() });
+      //
+      // #1768: stamp the FULL-µs `updated_at_iso` (projected via to_char), NOT
+      // `page.updated_at.toISOString()` — the JS Date is ms-truncated, so the
+      // µs-precision DB updated_at stayed strictly greater and the page never
+      // cleared on Postgres. Stamping the exact value makes them equal.
+      processedRefs.push({ slug: page.slug, source_id: page.source_id, extractedAt: page.updated_at_iso });
     }
 
     // Flush NON-swallowing (CDX-4): a throw here propagates out of the sweep so

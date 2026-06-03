@@ -608,6 +608,15 @@ export interface StalePageRow {
   timeline: string;
   frontmatter: Record<string, unknown>;
   updated_at: Date;
+  /**
+   * Full-precision (microsecond) UTC ISO string of `updated_at`, projected
+   * straight from the DB via `to_char(... AT TIME ZONE 'UTC', '...US"Z"')`.
+   * `updated_at` (a JS `Date`) is millisecond-truncated, so stamping it back as
+   * `links_extracted_at` left the row permanently stale on Postgres (#1768).
+   * `extractStaleFromDB` stamps THIS instead, so `links_extracted_at` equals the
+   * DB `updated_at` exactly and the staleness predicate clears.
+   */
+  updated_at_iso: string;
 }
 
 export interface ChunkInput {

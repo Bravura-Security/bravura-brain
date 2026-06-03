@@ -1439,6 +1439,39 @@ async function handleCliOnly(command: string, args: string[]) {
     return;
   }
 
+  // #1633: out-of-band hard-deadline watchdog for `gbrain sync`. Installed
+  // BEFORE connectEngine so a connect-phase hang (the reported zombie class) is
+  // bounded too. A Bun Worker on its own OS thread SIGKILLs the process at the
+  // deadline even when the main event loop is starved by a synchronous spin —
+  // the only thing that stops the cron orphan-pileup. Disposed in the finally.
+  let syncWatchdog: { dispose(): void } | null = null;
+  if (command === 'sync') {
+    try {
+      const { resolveSyncHardDeadline } = await import('./commands/sync.ts');
+      const res = resolveSyncHardDeadline(args, {
+        isTty: Boolean(process.stdout.isTTY),
+        env: process.env,
+      });
+      if (res) {
+        const { installProcessWatchdog } = await import('./core/process-watchdog.ts');
+        syncWatchdog = installProcessWatchdog({
+          deadlineMs: res.deadlineMs,
+          graceMs: res.graceMs,
+          label: 'sync-watchdog',
+          heartbeatMs: 60_000,
+        });
+        process.stderr.write(
+          `[sync-watchdog] hard deadline armed: ${Math.round(res.deadlineMs / 1000)}s ` +
+          `+ ${Math.round(res.graceMs / 1000)}s grace (${res.reason}); disable with --no-hard-deadline\n`,
+        );
+      }
+    } catch (e) {
+      // A bad --hard-deadline value throws here (same posture as --timeout).
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(1);
+    }
+  }
+
   // All remaining CLI-only commands need a DB connection
   const engine = await connectEngine();
   try {
@@ -1875,6 +1908,7 @@ async function handleCliOnly(command: string, args: string[]) {
       }
     }
   } finally {
+    syncWatchdog?.dispose(); // #1633: tear down the hard-deadline watchdog on clean exit
     if (command !== 'serve') await engine.disconnect();
   }
 }
