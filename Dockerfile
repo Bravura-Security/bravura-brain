@@ -1,6 +1,9 @@
 # gbrain production image — Bun-compiled binary with embedded /admin SPA.
 # Build sequence per gbrain: install deps, build+embed admin, then compile.
-FROM oven/bun:1.3-debian AS build
+# Build stage runs on the native build arch and cross-compiles the binary to the
+# TARGET arch (Bun supports --target), so multi/cross-arch builds avoid emulating Bun.
+FROM --platform=$BUILDPLATFORM oven/bun:1.3-debian AS build
+ARG TARGETARCH
 WORKDIR /app
 
 # Root deps first (better layer caching)
@@ -14,10 +17,16 @@ RUN cd admin && bun install || true
 # Source
 COPY . .
 
-# Build + embed the admin SPA, then compile the self-contained binary.
+# Build + embed the admin SPA, then cross-compile the self-contained binary
+# for the target architecture.
 RUN cd admin && bun run build && cd .. \
  && bun run scripts/build-admin-embedded.ts \
- && bun build --compile --outfile bin/gbrain src/cli.ts
+ && case "$TARGETARCH" in \
+      amd64) BT=bun-linux-x64 ;; \
+      arm64) BT=bun-linux-arm64 ;; \
+      *)     BT=bun-linux-x64 ;; \
+    esac \
+ && bun build --compile --target="$BT" --outfile bin/gbrain src/cli.ts
 
 # ---- runtime ----
 FROM oven/bun:1.3-slim AS runtime
