@@ -1,0 +1,97 @@
+import type { Recipe } from '../types.ts';
+
+/**
+ * Amazon Bedrock — keyless, region-scoped access to Claude (chat/expansion)
+ * and Cohere (embedding) over a single AWS auth seam.
+ *
+ * AUTH MODEL (the whole point of this recipe): NO static API keys. Credentials
+ * resolve through the AWS default provider chain (`@aws-sdk/credential-provider-node`
+ * `defaultProvider()`), which the gateway wires into `createAmazonBedrock`'s
+ * `credentialProvider` hook. That chain walks, in order:
+ *   env (AWS_ACCESS_KEY_ID/…) → SSO token cache → web-identity token file
+ *   (EKS Pod Identity / IRSA — the production path) → shared ini profile
+ *   (AWS_PROFILE — the local path) → EC2/ECS IMDS.
+ * So the same recipe works unchanged in an EKS pod (Pod Identity) and on a
+ * laptop (`AWS_PROFILE=...`). The `@ai-sdk/amazon-bedrock` provider on its own
+ * only reads AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY from env — it does NOT
+ * walk profiles or Pod Identity — which is why the gateway must inject the
+ * full chain via `credentialProvider`. The recipe itself holds zero secrets.
+ *
+ * REGION: defaults to ca-central-1; `AWS_REGION` or `BEDROCK_REGION` override
+ * (resolved in the gateway's bedrock factory). No `auth_env.required` because
+ * keyless auth means there is no single env var to gate on — readiness is
+ * "can the AWS chain produce credentials", surfaced at first call.
+ *
+ * MODEL IDS are Bedrock inference-profile IDs (region-prefixed: `global.`,
+ * `us.`, …), NOT bare Anthropic API ids. The `global.` prefix routes through
+ * Bedrock's global cross-region inference; `us.` pins the US geo.
+ *
+ * Reference: https://docs.aws.amazon.com/bedrock/latest/userguide/
+ */
+export const bedrock: Recipe = {
+  id: 'bedrock',
+  name: 'Amazon Bedrock',
+  tier: 'native',
+  implementation: 'native-bedrock',
+  // No base_url_default: the SDK builds region-scoped Bedrock URLs itself.
+  auth_env: {
+    // Keyless: credentials come from the AWS default provider chain (env /
+    // SSO / Pod Identity / profile / IMDS). No required env var to gate on —
+    // an empty required[] makes `gbrain providers list` show this as ready
+    // and defers any credential failure to the first real call, with the
+    // AWS SDK's own resolution error.
+    required: [],
+    optional: ['AWS_REGION', 'BEDROCK_REGION', 'AWS_PROFILE'],
+    setup_url:
+      'https://docs.aws.amazon.com/bedrock/latest/userguide/getting-started.html',
+  },
+  touchpoints: {
+    embedding: {
+      // Cohere embed on Bedrock. embed-v4 is the documented default;
+      // embed-english-v3 is the broadly-available fallback. Both emit 1024-dim
+      // vectors.
+      //
+      // NOTE (verified 2026-06-22, ca-central-1): `cohere.embed-v4:0` is
+      // INFERENCE_PROFILE-only there — invoking the bare model id on-demand
+      // returns "Invocation of model ID cohere.embed-v4:0 with on-demand
+      // throughput isn't supported." `cohere.embed-english-v3` IS available
+      // on-demand and is the safe default for accounts/regions that haven't
+      // set up a cross-region embed inference profile. Use embed-v4 via its
+      // inference-profile id where enabled.
+      models: ['cohere.embed-v4:0', 'cohere.embed-english-v3', 'cohere.embed-multilingual-v3'],
+      default_dims: 1024,
+      cost_per_1m_tokens_usd: 0.12, // Cohere embed-v4 on Bedrock (approx.)
+      price_last_verified: '2026-06-22',
+      // Cohere's Bedrock embed endpoint caps at 96 texts / ~128K tokens per
+      // request; cap conservatively so the gateway pre-splits + the
+      // recursive-halving safety net engages on overflow.
+      max_batch_tokens: 100_000,
+    },
+    expansion: {
+      models: ['global.anthropic.claude-haiku-4-5-20251001-v1:0', 'us.anthropic.claude-haiku-4-5-20251001-v1:0'],
+      cost_per_1m_tokens_usd: 1.0, // Haiku-class on Bedrock (approx.)
+      price_last_verified: '2026-06-22',
+    },
+    chat: {
+      // Inference-profile IDs. Default is the global Sonnet profile; the us.*
+      // Opus / Haiku profiles are also supported.
+      models: [
+        'global.anthropic.claude-sonnet-4-6',
+        'us.anthropic.claude-opus-4-8',
+        'us.anthropic.claude-sonnet-4-6-v1',
+        'global.anthropic.claude-haiku-4-5-20251001-v1:0',
+        'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      ],
+      supports_tools: true,
+      supports_subagent_loop: true,
+      // Bedrock honors Anthropic's ephemeral cache_control markers.
+      supports_prompt_cache: true,
+      max_context_tokens: 200000,
+      cost_per_1m_input_usd: 3.0, // sonnet-class baseline on Bedrock
+      cost_per_1m_output_usd: 15.0,
+      price_last_verified: '2026-06-22',
+    },
+  },
+  setup_hint:
+    'No API key needed. Auth uses the AWS default credential chain: run `aws sso login --profile <p>` then `export AWS_PROFILE=<p>` locally, or rely on EKS Pod Identity / IRSA in production. Set AWS_REGION or BEDROCK_REGION (default ca-central-1). Configure with e.g. `--chat-model bedrock:global.anthropic.claude-sonnet-4-6` and `--embedding-model bedrock:cohere.embed-v4:0 --embedding-dimensions 1024`.',
+};

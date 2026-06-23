@@ -27,6 +27,8 @@ import { listRecipes } from './recipes/index.ts';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
+import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { z } from 'zod';
 
@@ -1192,6 +1194,33 @@ async function resolveEmbeddingProvider(modelStr: string): Promise<{ model: any;
   return { model, recipe, modelId: parsed.modelId };
 }
 
+/**
+ * Shared Amazon Bedrock provider factory (keyless).
+ *
+ * Bedrock is the first KEYLESS native recipe: no static API key is read from
+ * the env snapshot. Instead we inject the FULL AWS default credential chain via
+ * `credentialProvider` — `@aws-sdk/credential-provider-node`'s `defaultProvider()`
+ * walks env → SSO → web-identity (EKS Pod Identity / IRSA, the prod path) →
+ * shared-ini profile (AWS_PROFILE, the local path) → IMDS. The
+ * `@ai-sdk/amazon-bedrock` provider on its own only reads AWS_ACCESS_KEY_ID /
+ * AWS_SECRET_ACCESS_KEY from env; wiring `credentialProvider` here is what makes
+ * the recipe work unchanged in a pod and on a laptop.
+ *
+ * REGION resolution: AWS_REGION → BEDROCK_REGION → ca-central-1. Resolved from
+ * the gateway's env snapshot (cfg.env), never process.env, per the gateway's
+ * call-time-env rule.
+ */
+function createBedrockProvider(cfg: AIGatewayConfig): ReturnType<typeof createAmazonBedrock> {
+  const region = cfg.env.AWS_REGION ?? cfg.env.BEDROCK_REGION ?? 'ca-central-1';
+  return createAmazonBedrock({
+    region,
+    // defaultProvider() returns the AWS credential chain's resolver, which
+    // yields { accessKeyId, secretAccessKey, sessionToken? } — exactly the
+    // Omit<BedrockCredentials, 'region'> shape credentialProvider expects.
+    credentialProvider: defaultProvider(),
+  });
+}
+
 function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayConfig): any {
   switch (recipe.implementation) {
     case 'native-openai': {
@@ -1221,6 +1250,10 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
       throw new AIConfigError(
         `Anthropic has no embedding model. Use openai or google for embeddings.`,
       );
+    case 'native-bedrock':
+      // Keyless: credentials resolve through the AWS default provider chain
+      // wired in createBedrockProvider. Cohere embed on Bedrock.
+      return createBedrockProvider(cfg).embeddingModel(modelId);
     case 'openai-compatible': {
       // D12=A: unified auth via Recipe.resolveAuth (or default).
       const auth = applyResolveAuth(recipe, cfg, 'embedding');
@@ -2135,6 +2168,10 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
       if (!apiKey) throw new AIConfigError(`Anthropic expansion requires ANTHROPIC_API_KEY.`, recipe.setup_hint);
       return createAnthropic({ apiKey }).languageModel(modelId);
     }
+    case 'native-bedrock':
+      // Keyless: AWS default credential chain via createBedrockProvider.
+      // Claude (Haiku-class) inference profile on Bedrock for expansion.
+      return createBedrockProvider(cfg).languageModel(modelId);
     case 'openai-compatible': {
       // D12=A: unified auth via Recipe.resolveAuth (or default).
       const auth = applyResolveAuth(recipe, cfg, 'expansion');
@@ -2507,6 +2544,10 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
       if (!apiKey) throw new AIConfigError(`Anthropic chat requires ANTHROPIC_API_KEY.`, recipe.setup_hint);
       return createAnthropic({ apiKey }).languageModel(modelId);
     }
+    case 'native-bedrock':
+      // Keyless: AWS default credential chain via createBedrockProvider.
+      // Claude inference profile on Bedrock for chat/subagent loops.
+      return createBedrockProvider(cfg).languageModel(modelId);
     case 'openai-compatible': {
       // D12=A: unified auth via Recipe.resolveAuth (or default).
       const auth = applyResolveAuth(recipe, cfg, 'chat');

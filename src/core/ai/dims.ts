@@ -144,6 +144,12 @@ export function dimsProviderOptions(
     case 'native-anthropic':
       // Anthropic has no embedding model.
       return undefined;
+    case 'native-bedrock':
+      // Cohere embed on Bedrock is natively 1024-dim. The bedrock provider
+      // keys provider options under `bedrock` (not the openai/openaiCompatible
+      // shapes), and Cohere's Bedrock embed endpoint takes no dimension
+      // override — so emit nothing and let the model return its native width.
+      return undefined;
     case 'openai-compatible':
       // ZE zembed-1 — flexible Matryoshka dims + asymmetric input_type.
       // Lives BEFORE the generic openai-compatible fall-through to avoid
