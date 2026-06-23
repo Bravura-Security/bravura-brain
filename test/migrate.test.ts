@@ -442,16 +442,19 @@ describe('migration v24 — rls_backfill_missing_tables', () => {
     );
   });
 
-  // Codex found: if v24 RAISE WARNINGs instead of raising on non-BYPASSRLS,
-  // the migration runner still bumps schema_version to 24, permanently
-  // skipping the backfill on future runs even after the role is fixed.
-  // The fix is to raise loudly so the transaction aborts, version stays
-  // at 23, and the next initSchema call retries after role reassignment.
-  test('fails loudly on non-BYPASSRLS roles instead of silently bumping version', () => {
+  // Managed-Postgres graceful degrade (Aurora/RDS): when the connection role
+  // is rds_superuser-class but lacks BYPASSRLS, enabling RLS would lock the
+  // session out of its own data, and there's no anon-key exposure off Supabase
+  // so RLS is unnecessary. v24 must WARN-and-skip the RLS backfill (mirroring
+  // schema.sql's base RLS block) so the migration records as applied, instead
+  // of hard-failing. The Supabase (BYPASSRLS) path still enables RLS.
+  test('warns and skips RLS backfill on non-BYPASSRLS roles (managed Postgres)', () => {
     const v24 = MIGRATIONS.find(m => m.version === 24);
     const sql = v24!.sql || '';
-    expect(sql).toMatch(/RAISE EXCEPTION[^;]*BYPASSRLS/);
-    expect(sql).not.toMatch(/RAISE WARNING[^;]*BYPASSRLS/);
+    expect(sql).toMatch(/RAISE WARNING[^;]*BYPASSRLS/);
+    expect(sql).not.toMatch(/RAISE EXCEPTION[^;]*BYPASSRLS/);
+    // RLS still enabled (on the BYPASSRLS branch).
+    expect(sql).toMatch(/ENABLE ROW LEVEL SECURITY/);
   });
 
   test('LATEST_VERSION has caught up to 24', () => {
@@ -542,11 +545,26 @@ describe('migration v35 — auto_rls_event_trigger structural guards', () => {
     expect(sql).toMatch(/'\^GBRAIN:RLS_EXEMPT\\s\+reason=\\S\.\{3,\}'/);
   });
 
-  test('backfill is gated on rolbypassrls (matches v24 posture)', () => {
+  test('backfill is gated on rolbypassrls and warns-and-skips off Supabase (managed Postgres)', () => {
     const v35 = MIGRATIONS.find(m => m.version === 35);
     const sql = ((v35?.sqlFor as any)?.postgres ?? '') as string;
     expect(sql).toMatch(/rolbypassrls/);
-    expect(sql).toMatch(/RAISE\s+EXCEPTION/i);
+    // Managed-Postgres graceful degrade: warn-and-skip the backfill rather than
+    // hard-fail when the role lacks BYPASSRLS (mirrors schema.sql / v24 posture).
+    expect(sql).toMatch(/RAISE\s+WARNING[^;]*BYPASSRLS/i);
+    expect(sql).not.toMatch(/RAISE\s+EXCEPTION/i);
+  });
+
+  test('CREATE EVENT TRIGGER is gated on superuser (managed Postgres can skip it)', () => {
+    const v35 = MIGRATIONS.find(m => m.version === 35);
+    const sql = ((v35?.sqlFor as any)?.postgres ?? '') as string;
+    // CREATE EVENT TRIGGER requires superuser; on Aurora/RDS the connection
+    // role is rds_superuser-class but not a true superuser. Gate on rolsuper
+    // and warn-and-skip so the migration still completes (auto-RLS is
+    // Supabase-only defense-in-depth — safe to skip off Supabase).
+    expect(sql).toMatch(/rolsuper/);
+    expect(sql).toMatch(/CREATE EVENT TRIGGER/);
+    expect(sql).toMatch(/RAISE\s+WARNING[^;]*superuser/i);
   });
 });
 
@@ -1319,11 +1337,17 @@ describe('migration v31 — eval_capture_tables', () => {
     }
   });
 
-  test('Postgres variant gates RLS on BYPASSRLS and fails loudly', () => {
+  test('Postgres variant creates tables always, gates RLS on BYPASSRLS, warns-and-skips off Supabase', () => {
     const pgSql = MIGRATIONS.find(m => m.version === 31)!.sqlFor!.postgres!;
     expect(pgSql).toContain('rolbypassrls');
-    expect(pgSql).toMatch(/IF NOT has_bypass/);
-    expect(pgSql).toMatch(/RAISE EXCEPTION[^;]*BYPASSRLS/);
+    // Tables are always created (CREATE TABLE outside the BYPASSRLS gate); only
+    // the RLS-enabling DDL is gated. Managed-Postgres graceful degrade
+    // (Aurora/RDS): warn-and-skip RLS rather than hard-fail.
+    expect(pgSql).toMatch(/IF has_bypass THEN/);
+    expect(pgSql).toMatch(/RAISE WARNING[^;]*BYPASSRLS/);
+    expect(pgSql).not.toMatch(/RAISE EXCEPTION[^;]*BYPASSRLS/);
+    expect(pgSql).toContain('CREATE TABLE IF NOT EXISTS eval_candidates');
+    expect(pgSql).toContain('CREATE TABLE IF NOT EXISTS eval_capture_failures');
     expect(pgSql).toContain('ALTER TABLE eval_candidates ENABLE ROW LEVEL SECURITY');
     expect(pgSql).toContain('ALTER TABLE eval_capture_failures ENABLE ROW LEVEL SECURITY');
   });

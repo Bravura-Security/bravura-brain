@@ -864,44 +864,46 @@ export const MIGRATIONS: Migration[] = [
       BEGIN
         SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
         IF NOT has_bypass THEN
-          -- Fail the migration loudly instead of WARNING + version-bump.
-          -- The runner unconditionally records schema_version on success,
-          -- so a silent WARNING here would permanently lock the backfill out
-          -- on future runs even after switching to a bypass role. Raising
-          -- aborts the transaction, leaves schema_version at the prior value,
-          -- and lets the next invocation retry after the role is fixed.
-          RAISE EXCEPTION 'v24 rls_backfill_missing_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
-        END IF;
+          -- Managed-Postgres graceful degrade (Aurora/RDS): the connection role
+          -- is rds_superuser-class but lacks BYPASSRLS. Enabling RLS without
+          -- BYPASSRLS would lock the session out of its own data, and on managed
+          -- Postgres there's no PostgREST/anon-key exposure so RLS is unnecessary
+          -- (the threat model is Supabase-specific; see docs/guides/rls-and-you.md).
+          -- Warn and skip the RLS-enabling DDL so the migration records as applied,
+          -- mirroring schema.sql's base RLS DO block. Supabase (BYPASSRLS) path
+          -- below is unchanged.
+          RAISE WARNING 'v24 rls_backfill_missing_tables: role % does not have BYPASSRLS — skipping RLS backfill (expected on managed Postgres/Aurora; no anon exposure). Re-run as postgres (or another BYPASSRLS role) to harden.', current_user;
+        ELSE
+          -- These 8 are guaranteed to exist: schema.sql creates them (idempotent
+          -- via IF NOT EXISTS) on every initSchema call, and initSchema runs
+          -- before this migration. Bare ALTER TABLE is safe.
+          ALTER TABLE access_tokens ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE mcp_request_log ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE minion_inbox ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE minion_attachments ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE subagent_messages ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE subagent_tool_executions ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE subagent_rate_leases ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE gbrain_cycle_locks ENABLE ROW LEVEL SECURITY;
 
-        -- These 8 are guaranteed to exist: schema.sql creates them (idempotent
-        -- via IF NOT EXISTS) on every initSchema call, and initSchema runs
-        -- before this migration. Bare ALTER TABLE is safe.
-        ALTER TABLE access_tokens ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE mcp_request_log ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE minion_inbox ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE minion_attachments ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE subagent_messages ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE subagent_tool_executions ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE subagent_rate_leases ENABLE ROW LEVEL SECURITY;
-        ALTER TABLE gbrain_cycle_locks ENABLE ROW LEVEL SECURITY;
+          -- budget_ledger + budget_reservations are migration-only (v12). Not
+          -- in schema.sql, not re-created on every initSchema. In normal flow
+          -- v12 runs before v24 so they exist, but if an operator manually
+          -- dropped them (unusual — budget data is regenerable from resolver
+          -- logs) or was pinned to a pre-v12 gbrain version when the table
+          -- went away, the bare ALTER would fail with 42P01 and abort v24.
+          -- information_schema.tables lookup makes the statement self-healing.
+          IF EXISTS (SELECT 1 FROM information_schema.tables
+                      WHERE table_schema = 'public' AND table_name = 'budget_ledger') THEN
+            ALTER TABLE budget_ledger ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF EXISTS (SELECT 1 FROM information_schema.tables
+                      WHERE table_schema = 'public' AND table_name = 'budget_reservations') THEN
+            ALTER TABLE budget_reservations ENABLE ROW LEVEL SECURITY;
+          END IF;
 
-        -- budget_ledger + budget_reservations are migration-only (v12). Not
-        -- in schema.sql, not re-created on every initSchema. In normal flow
-        -- v12 runs before v24 so they exist, but if an operator manually
-        -- dropped them (unusual — budget data is regenerable from resolver
-        -- logs) or was pinned to a pre-v12 gbrain version when the table
-        -- went away, the bare ALTER would fail with 42P01 and abort v24.
-        -- information_schema.tables lookup makes the statement self-healing.
-        IF EXISTS (SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'public' AND table_name = 'budget_ledger') THEN
-          ALTER TABLE budget_ledger ENABLE ROW LEVEL SECURITY;
+          RAISE NOTICE 'v24: RLS backfill complete (role % has BYPASSRLS)', current_user;
         END IF;
-        IF EXISTS (SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'public' AND table_name = 'budget_reservations') THEN
-          ALTER TABLE budget_reservations ENABLE ROW LEVEL SECURITY;
-        END IF;
-
-        RAISE NOTICE 'v24: RLS backfill complete (role % has BYPASSRLS)', current_user;
       END $$;
     `,
     // PGLite has no RLS engine and is intrinsically single-tenant (local file).
@@ -1153,13 +1155,15 @@ export const MIGRATIONS: Migration[] = [
         BEGIN
           SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
           IF NOT has_bypass THEN
-            RAISE EXCEPTION 'v29 cathedral_ii_code_edges_rls: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
+            -- Managed-Postgres graceful degrade (Aurora/RDS): warn and skip RLS
+            -- (no anon-key exposure off Supabase). Mirrors schema.sql's base block.
+            RAISE WARNING 'v29 cathedral_ii_code_edges_rls: role % does not have BYPASSRLS — skipping RLS on code_edges tables (expected on managed Postgres/Aurora). Re-run as postgres (or another BYPASSRLS role) to harden.', current_user;
+          ELSE
+            ALTER TABLE code_edges_chunk ENABLE ROW LEVEL SECURITY;
+            ALTER TABLE code_edges_symbol ENABLE ROW LEVEL SECURITY;
+
+            RAISE NOTICE 'v29: code_edges RLS enabled (role % has BYPASSRLS)', current_user;
           END IF;
-
-          ALTER TABLE code_edges_chunk ENABLE ROW LEVEL SECURITY;
-          ALTER TABLE code_edges_symbol ENABLE ROW LEVEL SECURITY;
-
-          RAISE NOTICE 'v29: code_edges RLS enabled (role % has BYPASSRLS)', current_user;
         END $$;
       `,
       pglite: `-- PGLite: no-op. RLS check runs only against Postgres E2E.`,
@@ -1365,10 +1369,12 @@ export const MIGRATIONS: Migration[] = [
     //     surface silent drops cross-process. In-process counters don't work
     //     because doctor runs in a separate process from the MCP server.
     //
-    // RLS enable matches the v24 / v29 posture: fail loudly via RAISE EXCEPTION
-    // if current_user lacks BYPASSRLS, so the migration retries cleanly after
-    // operator fixes the role instead of silently bumping schema_version.
-    // PGLite ignores RLS; sqlFor carries the table+index DDL only.
+    // RLS enable matches the v24 / v29 posture: the tables are always created,
+    // but ENABLE ROW LEVEL SECURITY runs only when current_user holds BYPASSRLS.
+    // On a managed-Postgres role without BYPASSRLS (Aurora/RDS) it warns and
+    // skips RLS so the migration completes (no anon-key exposure off Supabase;
+    // mirrors schema.sql's base RLS block). PGLite ignores RLS; sqlFor carries
+    // the table+index DDL only.
     //
     // Renumbered v30→v31 on merge with master's v0.23.0 (dream_verdicts) which
     // claimed v30 first. Pre-existing brains that applied our v30 will see
@@ -1381,9 +1387,6 @@ export const MIGRATIONS: Migration[] = [
           has_bypass BOOLEAN;
         BEGIN
           SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
-          IF NOT has_bypass THEN
-            RAISE EXCEPTION 'v31 eval_capture_tables: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
-          END IF;
 
           CREATE TABLE IF NOT EXISTS eval_candidates (
             id SERIAL PRIMARY KEY,
@@ -1404,7 +1407,6 @@ export const MIGRATIONS: Migration[] = [
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           );
           CREATE INDEX IF NOT EXISTS idx_eval_candidates_created_at ON eval_candidates (created_at DESC);
-          ALTER TABLE eval_candidates ENABLE ROW LEVEL SECURITY;
 
           CREATE TABLE IF NOT EXISTS eval_capture_failures (
             id SERIAL PRIMARY KEY,
@@ -1412,9 +1414,17 @@ export const MIGRATIONS: Migration[] = [
             reason TEXT NOT NULL CHECK (reason IN ('db_down', 'rls_reject', 'check_violation', 'scrubber_exception', 'other'))
           );
           CREATE INDEX IF NOT EXISTS idx_eval_capture_failures_ts ON eval_capture_failures (ts DESC);
-          ALTER TABLE eval_capture_failures ENABLE ROW LEVEL SECURITY;
 
-          RAISE NOTICE 'v31: eval_capture tables ready (role % has BYPASSRLS)', current_user;
+          -- Tables are always created; RLS only enabled when the role can hold it.
+          -- Managed-Postgres graceful degrade (Aurora/RDS): warn and skip RLS
+          -- (no anon-key exposure off Supabase). Mirrors schema.sql's base block.
+          IF has_bypass THEN
+            ALTER TABLE eval_candidates ENABLE ROW LEVEL SECURITY;
+            ALTER TABLE eval_capture_failures ENABLE ROW LEVEL SECURITY;
+            RAISE NOTICE 'v31: eval_capture tables ready (role % has BYPASSRLS)', current_user;
+          ELSE
+            RAISE WARNING 'v31 eval_capture_tables: role % does not have BYPASSRLS — created tables without RLS (expected on managed Postgres/Aurora). Re-run as postgres (or another BYPASSRLS role) to harden.', current_user;
+          END IF;
         END $$;
       `,
       pglite: `
@@ -1673,9 +1683,14 @@ export const MIGRATIONS: Migration[] = [
     //     the DDL transaction, so a failed ALTER aborts the offending CREATE
     //     TABLE. That's a loud signal, not a silent gap. Wrapping would CREATE
     //     the silent path this migration exists to close.
-    //   - No privilege pre-check — runMigrations rethrows on SQL failure and
-    //     gates config.version, so a non-superuser run already fails loud with
-    //     an actionable Postgres error.
+    //   - Managed-Postgres graceful degrade (Aurora/RDS): the auto-RLS event
+    //     trigger is gated on rolsuper (CREATE EVENT TRIGGER needs superuser),
+    //     and the one-time backfill is gated on BYPASSRLS. When the connection
+    //     role is rds_superuser-class but not a true superuser / not BYPASSRLS,
+    //     both halves warn-and-skip so the migration still completes. This is
+    //     safe off Supabase: there's no PostgREST/anon-key exposure, so auto-RLS
+    //     is Supabase-only defense-in-depth. On Supabase (superuser + BYPASSRLS)
+    //     the behavior is unchanged.
     //
     // BREAKING CHANGE: the backfill is a one-time override of intentionally
     // RLS-off public tables that don't carry the GBRAIN:RLS_EXEMPT comment.
@@ -1684,32 +1699,54 @@ export const MIGRATIONS: Migration[] = [
     // PGLite: no-op — no RLS engine, no event triggers, single-tenant by design.
     sqlFor: {
       postgres: `
-        -- Trigger function: fires post-DDL inside the CREATE TABLE transaction.
-        -- A failure here aborts the CREATE TABLE so no public.* table is ever
-        -- created without RLS. object_identity is pre-quoted by Postgres
-        -- (e.g. "public"."My Table"), so %s is correct — %I would double-quote.
-        CREATE OR REPLACE FUNCTION auto_enable_rls()
-        RETURNS event_trigger AS $$
+        -- Auto-RLS event trigger (defense-in-depth for Supabase). CREATE EVENT
+        -- TRIGGER requires superuser; on managed Postgres (Aurora/RDS) the
+        -- connection role is rds_superuser-class but NOT a true superuser, so
+        -- this would hard-fail. There's also no PostgREST/anon-key exposure off
+        -- Supabase, so the auto-RLS trigger is unnecessary there — gate on
+        -- rolsuper and warn-and-skip otherwise. The function + trigger are
+        -- created via EXECUTE inside the gated DO block so the whole thing is
+        -- skipped atomically when the role isn't superuser.
+        DO $$
         DECLARE
-          obj record;
+          is_super BOOLEAN;
         BEGIN
-          FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
-            WHERE object_type = 'table'
-            AND schema_name = 'public'
-          LOOP
-            EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', obj.object_identity);
-          END LOOP;
-        END;
-        $$ LANGUAGE plpgsql;
+          SELECT rolsuper INTO is_super FROM pg_roles WHERE rolname = current_user;
+          IF NOT is_super THEN
+            RAISE WARNING 'v35 auto_rls_event_trigger: role % is not a superuser — skipping CREATE EVENT TRIGGER (expected on managed Postgres/Aurora; auto-RLS is Supabase-only defense-in-depth). Fresh tables are not auto-RLS''d on this install.', current_user;
+          ELSE
+            -- Trigger function: fires post-DDL inside the CREATE TABLE transaction.
+            -- A failure here aborts the CREATE TABLE so no public.* table is ever
+            -- created without RLS. object_identity is pre-quoted by Postgres
+            -- (e.g. "public"."My Table"), so %s is correct — %I would double-quote.
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION auto_enable_rls()
+              RETURNS event_trigger AS $body$
+              DECLARE
+                obj record;
+              BEGIN
+                FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
+                  WHERE object_type = 'table'
+                  AND schema_name = 'public'
+                LOOP
+                  EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', obj.object_identity);
+                END LOOP;
+              END;
+              $body$ LANGUAGE plpgsql;
+            $fn$;
 
-        -- WHEN TAG covers all three table-creation syntaxes Postgres reports.
-        -- CREATE TABLE / CREATE TABLE AS / SELECT INTO produce distinct command
-        -- tags; covering only 'CREATE TABLE' would leave a syntax-shaped hole.
-        DROP EVENT TRIGGER IF EXISTS auto_rls_on_create_table;
-        CREATE EVENT TRIGGER auto_rls_on_create_table
-          ON ddl_command_end
-          WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
-          EXECUTE FUNCTION auto_enable_rls();
+            -- WHEN TAG covers all three table-creation syntaxes Postgres reports.
+            -- CREATE TABLE / CREATE TABLE AS / SELECT INTO produce distinct command
+            -- tags; covering only 'CREATE TABLE' would leave a syntax-shaped hole.
+            EXECUTE 'DROP EVENT TRIGGER IF EXISTS auto_rls_on_create_table';
+            EXECUTE $et$
+              CREATE EVENT TRIGGER auto_rls_on_create_table
+                ON ddl_command_end
+                WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+                EXECUTE FUNCTION auto_enable_rls();
+            $et$;
+          END IF;
+        END $$;
 
         -- One-time backfill of every existing public.* base table without RLS.
         -- Honors the same GBRAIN:RLS_EXEMPT regex doctor.ts uses
@@ -1722,9 +1759,11 @@ export const MIGRATIONS: Migration[] = [
         BEGIN
           SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
           IF NOT has_bypass THEN
-            -- Same posture as v24: raise to abort the migration so the runner
-            -- leaves config.version unbumped and retries on the next call.
-            RAISE EXCEPTION 'v35 auto_rls_event_trigger backfill: role % does not have BYPASSRLS — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role).', current_user;
+            -- Managed-Postgres graceful degrade (Aurora/RDS): warn and skip the
+            -- backfill (no anon-key exposure off Supabase). Mirrors schema.sql's
+            -- base RLS block; lets the migration record as applied.
+            RAISE WARNING 'v35 auto_rls_event_trigger backfill: role % does not have BYPASSRLS — skipping RLS backfill (expected on managed Postgres/Aurora). Re-run as postgres (or another BYPASSRLS role) to harden.', current_user;
+            RETURN;
           END IF;
 
           FOR r IN
