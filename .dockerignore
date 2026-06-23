@@ -1,0 +1,15 @@
+.git
+node_modules
+admin/node_modules
+admin/dist
+bin
+test
+tests
+evals
+recipes
+docs
+CHANGELOG.md
+TODOS.md
+llms-full.txt
+llms.txt
+*.log

@@ -1,0 +1,49 @@
+name: build-image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "src/**"
+      - "admin/**"
+      - "scripts/**"
+      - "package.json"
+      - "bun.lock"
+      - "Dockerfile"
+      - ".github/workflows/build-image.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: tag
+        run: echo "tag=master-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ECR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ vars.ECR_REGISTRY }}/gbrain/server:${{ steps.tag.outputs.tag }}
+            ${{ vars.ECR_REGISTRY }}/gbrain/server:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - run: echo "Pushed ${{ vars.ECR_REGISTRY }}/gbrain/server:${{ steps.tag.outputs.tag }}"
