@@ -7,7 +7,9 @@
  *  - Recipe registered with the expected shape (native, keyless)
  *  - Claude inference-profile chat/expansion models + Cohere embedding models
  *  - 1024-dim embedding default
- *  - dimsProviderOptions returns undefined for native-bedrock (no dim override)
+ *  - dimsProviderOptions forwards the configured dim to Bedrock for Cohere
+ *    embed-v4 (outputDimension) and Titan v2 (dimensions); no override for
+ *    fixed-dim models (Cohere v3, Titan v1)
  *  - the recipe holds NO static credential env in auth_env.required
  */
 
@@ -35,10 +37,12 @@ describe('recipe: bedrock', () => {
     expect(r.auth_env?.optional).toContain('AWS_PROFILE');
   });
 
-  test('embedding touchpoint: Cohere embed-v4 default, 1024 dims', () => {
+  test('embedding touchpoint: Cohere embed-v4 (on-demand profile) default, 1024 dims', () => {
     const r = getRecipe('bedrock')!;
     expect(r.touchpoints.embedding).toBeDefined();
-    expect(r.touchpoints.embedding!.models[0]).toBe('cohere.embed-v4:0');
+    // On-demand-capable inference-profile id (bare cohere.embed-v4:0 is
+    // profile-only and not on-demand-invocable in ca-central-1).
+    expect(r.touchpoints.embedding!.models[0]).toBe('global.cohere.embed-v4:0');
     expect(r.touchpoints.embedding!.models).toContain('cohere.embed-english-v3');
     expect(r.touchpoints.embedding!.default_dims).toBe(1024);
     // Declares a batch cap so the recursive-halving safety net engages.
@@ -62,11 +66,30 @@ describe('recipe: bedrock', () => {
     expect(r.touchpoints.expansion!.models[0]).toContain('anthropic.claude-haiku');
   });
 
-  test('dimsProviderOptions returns undefined for native-bedrock (native 1024)', () => {
-    // Cohere embed on Bedrock is fixed 1024; gbrain pins the schema default and
-    // sends no dimension override (the bedrock provider keys options under
-    // `bedrock`, not the openai/openaiCompatible shapes).
-    expect(dimsProviderOptions('native-bedrock', 'cohere.embed-v4:0', 1024)).toBeUndefined();
+  test('dimsProviderOptions forwards output_dimension to Cohere embed-v4', () => {
+    // embed-v4 defaults to 1536 on Bedrock; without forwarding the configured
+    // dim it would break the vector(1024) column. The bedrock provider keys
+    // options under `bedrock` and maps `outputDimension` → wire
+    // `output_dimension` for Cohere embed models.
+    expect(dimsProviderOptions('native-bedrock', 'global.cohere.embed-v4:0', 1024)).toEqual({
+      bedrock: { outputDimension: 1024 },
+    });
+    expect(dimsProviderOptions('native-bedrock', 'cohere.embed-v4:0', 512)).toEqual({
+      bedrock: { outputDimension: 512 },
+    });
+  });
+
+  test('dimsProviderOptions forwards dimensions to Titan embed v2', () => {
+    // Titan v2 maps `dimensions` → wire `dimensions`.
+    expect(dimsProviderOptions('native-bedrock', 'amazon.titan-embed-text-v2:0', 1024)).toEqual({
+      bedrock: { dimensions: 1024 },
+    });
+  });
+
+  test('dimsProviderOptions returns undefined for fixed-dim Bedrock embed models', () => {
+    // Cohere v3 and Titan v1 are fixed-width and reject a dim override.
     expect(dimsProviderOptions('native-bedrock', 'cohere.embed-english-v3', 1024)).toBeUndefined();
+    expect(dimsProviderOptions('native-bedrock', 'cohere.embed-multilingual-v3', 1024)).toBeUndefined();
+    expect(dimsProviderOptions('native-bedrock', 'amazon.titan-embed-text-v1', 1536)).toBeUndefined();
   });
 });

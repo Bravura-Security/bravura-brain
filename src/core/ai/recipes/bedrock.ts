@@ -47,18 +47,22 @@ export const bedrock: Recipe = {
   },
   touchpoints: {
     embedding: {
-      // Cohere embed on Bedrock. embed-v4 is the documented default;
-      // embed-english-v3 is the broadly-available fallback. Both emit 1024-dim
-      // vectors.
+      // Cohere embed on Bedrock. embed-v4 is the default; it accepts a
+      // configurable output_dimension (256/512/1024/1536) and — unlike
+      // embed-english-v3, which caps input at ~2048 chars and silently
+      // drops longer docs — handles long documents. embed-english-v3 is the
+      // broadly-available fallback. The gateway forwards the configured
+      // embedding_dimensions to Cohere v4 as `output_dimension` (see
+      // dims.ts native-bedrock branch), so set --embedding-dimensions 1024.
       //
-      // NOTE (verified 2026-06-22, ca-central-1): `cohere.embed-v4:0` is
-      // INFERENCE_PROFILE-only there — invoking the bare model id on-demand
-      // returns "Invocation of model ID cohere.embed-v4:0 with on-demand
-      // throughput isn't supported." `cohere.embed-english-v3` IS available
-      // on-demand and is the safe default for accounts/regions that haven't
-      // set up a cross-region embed inference profile. Use embed-v4 via its
-      // inference-profile id where enabled.
-      models: ['cohere.embed-v4:0', 'cohere.embed-english-v3', 'cohere.embed-multilingual-v3'],
+      // NOTE (verified 2026-06-22, ca-central-1): use the ON-DEMAND-capable
+      // inference-profile id `global.cohere.embed-v4:0`. The BARE model id
+      // `cohere.embed-v4:0` is INFERENCE_PROFILE-only there — invoking it
+      // on-demand returns "Invocation of model ID cohere.embed-v4:0 with
+      // on-demand throughput isn't supported." `cohere.embed-english-v3` IS
+      // available on-demand directly and is the safe fallback for
+      // accounts/regions without a cross-region embed inference profile.
+      models: ['global.cohere.embed-v4:0', 'cohere.embed-english-v3', 'cohere.embed-multilingual-v3'],
       default_dims: 1024,
       cost_per_1m_tokens_usd: 0.12, // Cohere embed-v4 on Bedrock (approx.)
       price_last_verified: '2026-06-22',
@@ -93,5 +97,5 @@ export const bedrock: Recipe = {
     },
   },
   setup_hint:
-    'No API key needed. Auth uses the AWS default credential chain: run `aws sso login --profile <p>` then `export AWS_PROFILE=<p>` locally, or rely on EKS Pod Identity / IRSA in production. Set AWS_REGION or BEDROCK_REGION (default ca-central-1). Configure with e.g. `--chat-model bedrock:global.anthropic.claude-sonnet-4-6` and `--embedding-model bedrock:cohere.embed-v4:0 --embedding-dimensions 1024`.',
+    'No API key needed. Auth uses the AWS default credential chain: run `aws sso login --profile <p>` then `export AWS_PROFILE=<p>` locally, or rely on EKS Pod Identity / IRSA in production. Set AWS_REGION or BEDROCK_REGION (default ca-central-1). Configure with e.g. `--chat-model bedrock:global.anthropic.claude-sonnet-4-6` and `--embedding-model bedrock:global.cohere.embed-v4:0 --embedding-dimensions 1024` (use the `global.` inference-profile id for embed-v4 — the bare `cohere.embed-v4:0` is profile-only and not on-demand-invocable).',
 };
