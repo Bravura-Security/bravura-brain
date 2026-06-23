@@ -95,6 +95,32 @@ export const bedrock: Recipe = {
       cost_per_1m_output_usd: 15.0,
       price_last_verified: '2026-06-22',
     },
+    reranker: {
+      // Cohere cross-encoder rerankers on Bedrock, keyless via the AWS default
+      // credential chain (same auth seam as the chat/embed touchpoints —
+      // gateway.rerank() routes native-bedrock recipes through a SigV4-signed
+      // bedrock-runtime InvokeModel call, NOT the ZE/llama HTTP wire path).
+      //
+      // NOTE (verified 2026-06-22, ca-central-1): cohere.rerank-v3-5:0 is
+      // ON_DEMAND / In-Region in ca-central-1 (NO inference-profile prefix —
+      // the bare model id is the on-demand-invocable id; there is no
+      // `global.`/`us.` rerank profile). amazon.rerank-v1:0 is the secondary
+      // option. The Bedrock Cohere rerank body is `{api_version: 2, query,
+      // documents, top_n?}` and the response is `{results: [{index,
+      // relevance_score}]}` — the gateway's native-bedrock rerank adapter
+      // builds that body and maps the response back to {index, relevanceScore}.
+      models: ['cohere.rerank-v3-5:0', 'amazon.rerank-v1:0'],
+      default_model: 'cohere.rerank-v3-5:0',
+      // Cohere Rerank 3.5 on Bedrock: ~$2.00 / 1K queries (per the AWS Bedrock
+      // pricing page) — billed per query+docs, not per token. Approximate the
+      // per-1M-token figure for the budget tracker's rerank pricing lookup.
+      cost_per_1m_tokens_usd: 2.0,
+      price_last_verified: '2026-06-22',
+      // Cohere Bedrock rerank accepts up to 1000 documents / 4K-token context
+      // per call. Cap the request body conservatively; gateway.rerank()
+      // pre-flights body size and fails open over-cap.
+      max_payload_bytes: 5_000_000,
+    },
   },
   setup_hint:
     'No API key needed. Auth uses the AWS default credential chain: run `aws sso login --profile <p>` then `export AWS_PROFILE=<p>` locally, or rely on EKS Pod Identity / IRSA in production. Set AWS_REGION or BEDROCK_REGION (default ca-central-1). Configure with e.g. `--chat-model bedrock:global.anthropic.claude-sonnet-4-6` and `--embedding-model bedrock:global.cohere.embed-v4:0 --embedding-dimensions 1024` (use the `global.` inference-profile id for embed-v4 — the bare `cohere.embed-v4:0` is profile-only and not on-demand-invocable).',

@@ -29,6 +29,9 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
+import { SignatureV4 } from '@smithy/signature-v4';
+import { HttpRequest } from '@smithy/protocol-http';
+import { Sha256 } from '@aws-crypto/sha256-js';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { z } from 'zod';
 
@@ -3234,7 +3237,175 @@ export function __setRerankTransportForTests(fn: RerankTransport | null): void {
   _rerankTransport = fn;
 }
 
+/**
+ * Test seam for the native-bedrock rerank path's SigV4 signing step. Signing
+ * resolves real AWS credentials via the default provider chain, which CI/laptop
+ * test runs without ambient creds cannot do — so tests install a stub that
+ * returns canned signed headers, letting them exercise the adapter's URL/body/
+ * response-mapping logic against `_rerankTransport` without real credentials.
+ * Production never sets this (null) and runs the real SignatureV4 signer.
+ */
+type BedrockRerankSigner = (args: {
+  region: string;
+  host: string;
+  path: string;
+  body: string;
+}) => Promise<Record<string, string>>;
+let _bedrockRerankSigner: BedrockRerankSigner | null = null;
+export function __setBedrockRerankSignerForTests(fn: BedrockRerankSigner | null): void {
+  _bedrockRerankSigner = fn;
+}
+
 const DEFAULT_RERANK_TIMEOUT_MS = 5000;
+
+/**
+ * Native Bedrock rerank adapter (cohere.rerank-*, amazon.rerank-*).
+ *
+ * Reranking is NOT in the AI SDK's abstraction and Bedrock's rerank models are
+ * NOT served over an OpenAI/ZE-style HTTP endpoint — they're invoked through the
+ * `bedrock-runtime` `InvokeModel` API, which requires SigV4 request signing.
+ * We build the signed request by hand (zero new deps — `@smithy/signature-v4`,
+ * `@smithy/protocol-http`, `@aws-crypto/sha256-js`, and the AWS default
+ * credential chain via `@aws-sdk/credential-provider-node` are already
+ * vendored for the keyless chat/embed Bedrock path).
+ *
+ * KEYLESS: credentials resolve through `defaultProvider()` — env → SSO →
+ * web-identity (EKS Pod Identity / IRSA, the prod path) → shared-ini profile
+ * (AWS_PROFILE, the local path) → IMDS. Identical seam to createBedrockProvider.
+ *
+ * REGION: AWS_REGION → BEDROCK_REGION → ca-central-1 (gateway env snapshot,
+ * never process.env). cohere.rerank-v3-5:0 is In-Region in ca-central-1 — the
+ * bare model id is the on-demand-invocable id (no inference-profile prefix).
+ *
+ * WIRE SHAPE: Cohere Bedrock rerank body is `{api_version: 2, query,
+ * documents: string[], top_n?}`; response is `{results: [{index,
+ * relevance_score}]}`. Amazon rerank uses the same response shape. We map back
+ * to the gateway's `{index, relevanceScore}` contract, identical to the HTTP path.
+ *
+ * Pre-flight payload guard + RerankError classification mirror the HTTP
+ * `rerank()` path so `applyReranker`'s fail-open decision table is unchanged.
+ */
+async function rerankViaBedrock(
+  input: RerankInput,
+  modelId: string,
+  tp: NonNullable<Recipe['touchpoints']['reranker']>,
+  cfg: AIGatewayConfig,
+  recordBudget: () => void,
+): Promise<RerankResult[]> {
+  const region = cfg.env.AWS_REGION ?? cfg.env.BEDROCK_REGION ?? 'ca-central-1';
+  const host = `bedrock-runtime.${region}.amazonaws.com`;
+  // InvokeModel path; the model id is URL-encoded into the path segment.
+  const path = `/model/${encodeURIComponent(modelId)}/invoke`;
+
+  const payload: Record<string, unknown> = {
+    // Cohere's Bedrock rerank schema requires api_version = 2. amazon.rerank
+    // ignores it harmlessly (extra field), so we always send it.
+    api_version: 2,
+    query: input.query,
+    documents: input.documents,
+    ...(input.topN !== undefined ? { top_n: input.topN } : {}),
+  };
+  const body = JSON.stringify(payload);
+
+  // Pre-flight payload size guard — same contract as the HTTP path.
+  const bodyBytes = Buffer.byteLength(body, 'utf8');
+  if (bodyBytes > tp.max_payload_bytes) {
+    throw new RerankError(
+      `Rerank payload ${bodyBytes} bytes exceeds ${tp.max_payload_bytes} byte cap for bedrock`,
+      'payload_too_large',
+    );
+  }
+
+  const ctrl = new AbortController();
+  const timeoutMs = input.timeoutMs ?? DEFAULT_RERANK_TIMEOUT_MS;
+  const t = setTimeout(() => ctrl.abort(new Error('rerank timed out')), timeoutMs);
+  if (input.signal) {
+    if (input.signal.aborted) ctrl.abort(input.signal.reason);
+    else input.signal.addEventListener('abort', () => ctrl.abort(input.signal!.reason), { once: true });
+  }
+
+  try {
+    let signedHeaders: Record<string, string>;
+    if (_bedrockRerankSigner) {
+      signedHeaders = await _bedrockRerankSigner({ region, host, path, body });
+    } else {
+      const signer = new SignatureV4({
+        service: 'bedrock',
+        region,
+        credentials: defaultProvider(),
+        sha256: Sha256,
+      });
+      const unsigned = new HttpRequest({
+        method: 'POST',
+        protocol: 'https:',
+        hostname: host,
+        path,
+        headers: {
+          host,
+          'content-type': 'application/json',
+          accept: 'application/json',
+        },
+        body,
+      });
+      const signed = await signer.sign(unsigned);
+      signedHeaders = signed.headers as Record<string, string>;
+    }
+
+    const transport: RerankTransport = _rerankTransport ?? ((u, init) => fetch(u, init));
+    const resp = await transport(`https://${host}${path}`, {
+      method: 'POST',
+      headers: signedHeaders,
+      body,
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) {
+      let msg = `bedrock rerank HTTP ${resp.status}`;
+      try {
+        const txt = await resp.text();
+        if (txt) msg = `${msg}: ${txt.slice(0, 500)}`;
+      } catch {
+        // Body read failed — preserve status-only message.
+      }
+      const reason: RerankError['reason'] =
+        resp.status === 401 || resp.status === 403
+          ? 'auth'
+          : resp.status === 429
+          ? 'rate_limit'
+          : resp.status >= 500
+          ? 'network'
+          : 'unknown';
+      throw new RerankError(msg, reason, resp.status);
+    }
+    const json: any = await resp.json();
+    if (!json || !Array.isArray(json.results)) {
+      throw new RerankError('bedrock rerank: malformed response (no results array)', 'unknown');
+    }
+    const mapped: RerankResult[] = json.results.map((r: any) => ({
+      index: typeof r.index === 'number' ? r.index : 0,
+      // Cohere/amazon Bedrock return snake_case relevance_score; tolerate the
+      // camelCase relevanceScore the bedrock-agent-runtime Rerank API uses too.
+      relevanceScore:
+        typeof r.relevance_score === 'number'
+          ? r.relevance_score
+          : typeof r.relevanceScore === 'number'
+          ? r.relevanceScore
+          : 0,
+    }));
+    recordBudget();
+    return mapped;
+  } catch (err) {
+    recordBudget();
+    if (err instanceof RerankError) throw err;
+    if (err && typeof err === 'object' && (err as any).name === 'AbortError') {
+      const msg = (err as Error).message || 'rerank aborted';
+      throw new RerankError(msg, msg.toLowerCase().includes('timed out') ? 'timeout' : 'unknown');
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new RerankError(`bedrock rerank: ${msg}`, 'network');
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 /**
  * Submit a query + N documents to the configured reranker. Returns a list of
@@ -3296,8 +3467,33 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
     );
   }
 
-  // Resolve base URL + auth from the recipe (same path Voyage/ZE embeddings use).
   const cfg = requireConfig();
+
+  // Native Bedrock rerank (cohere.rerank-*, amazon.rerank-*) is NOT an
+  // OpenAI/ZE-style HTTP endpoint — it's a SigV4-signed bedrock-runtime
+  // InvokeModel call, keyless via the AWS default credential chain (same auth
+  // seam as the chat/embed touchpoints). Branch BEFORE applyOpenAICompatConfig
+  // (which would throw on a recipe with no base_url) and run the dedicated
+  // adapter. Budget reserve() already fired above; record() fires inside.
+  if (recipe.implementation === 'native-bedrock') {
+    return rerankViaBedrock(input, parsed.modelId, tp, cfg, () => {
+      if (!tracker) return;
+      try {
+        const totalChars = input.query.length + input.documents.reduce((s, d) => s + d.length, 0);
+        tracker.record({
+          modelId: modelStr,
+          inputTokens: Math.ceil(totalChars / 4),
+          outputTokens: 0,
+          kind: 'rerank',
+          label: 'gateway.rerank',
+        });
+      } catch {
+        // BudgetExhausted (TX1) suppressed; surfaces on next reserve().
+      }
+    });
+  }
+
+  // Resolve base URL + auth from the recipe (same path Voyage/ZE embeddings use).
   const compat = applyOpenAICompatConfig(recipe, cfg);
   // v0.40.6.1: rerank URL path is recipe-pluggable. Defaults to ZeroEntropy's
   // legacy `/models/rerank`; openai-style providers like llama.cpp's
