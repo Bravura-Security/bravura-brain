@@ -88,8 +88,15 @@ export const bedrock: Recipe = {
       ],
       supports_tools: true,
       supports_subagent_loop: true,
-      // Bedrock honors Anthropic's ephemeral cache_control markers.
-      supports_prompt_cache: true,
+      // Prompt caching stays OFF for Bedrock. The gateway's prompt-cache path
+      // (gateway.ts) injects Anthropic-native `cache_control: ephemeral` markers,
+      // which only the first-party Anthropic API consumes — the AI-SDK Bedrock
+      // provider uses a different Converse `cachePoint` mechanism that this recipe
+      // does not wire, so claiming support would inject markers Bedrock ignores
+      // (and breaks the "only the anthropic recipe claims prompt cache" invariant
+      // in test/ai/gateway-chat.test.ts). Revisit if/when the gateway grows a
+      // Converse cachePoint path.
+      supports_prompt_cache: false,
       max_context_tokens: 200000,
       cost_per_1m_input_usd: 3.0, // sonnet-class baseline on Bedrock
       cost_per_1m_output_usd: 15.0,
