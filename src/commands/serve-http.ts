@@ -43,6 +43,14 @@ import {
   type IngestionContentType,
   type IngestionEvent,
 } from '../core/ingestion/types.ts';
+import {
+  CF_ACCESS_JWT_HEADER,
+  resolveCfAccessConfig,
+  createCfAccessVerifier,
+  authenticateCfAccess,
+  CfAccessVerifyError,
+  type CfAccessVerifier,
+} from '../core/cf-access-auth.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -299,6 +307,12 @@ interface ServeHttpOptions {
    * tracking the regenerated value through other means.
    */
   suppressBootstrapToken?: boolean;
+  /**
+   * Test-only override for the Cloudflare Access JWT verifier. Production
+   * builds one from the env-driven config (remote JWKS); tests inject a
+   * verifier backed by a local key set so verification runs offline.
+   */
+  cfAccessVerifier?: CfAccessVerifier;
 }
 
 /**
@@ -480,6 +494,20 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     tokenTtl,
     dcrDisabled: !enableDcr,
   });
+
+  // ── Cloudflare Access JWT provider (dual-mode front for /mcp) ───────────
+  // When Cloudflare Access (self-hosted app) fronts this server, it injects a
+  // signed identity JWT on the `Cf-Access-Jwt-Assertion` header. We verify it
+  // and map the SSO identity → gbrain scope, so human users don't need a
+  // hand-minted token. Requests WITHOUT the header fall through to the OAuth/
+  // bearer path unchanged. A present-but-invalid JWT fails closed (401) and
+  // never falls through. Config is env-driven (see resolveCfAccessConfig).
+  const cfAccessConfig = resolveCfAccessConfig();
+  // Lazily built so the remote JWKS fetch (and its URL) only initializes when
+  // the provider is enabled. Tests inject their own verifier via the override.
+  const cfAccessVerifier: CfAccessVerifier | null = cfAccessConfig.enabled
+    ? (options.cfAccessVerifier ?? createCfAccessVerifier(cfAccessConfig))
+    : null;
 
   // Sweep expired tokens on startup (non-blocking)
   try {
@@ -1434,7 +1462,36 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
   });
 
-  app.post('/mcp', requireBearerAuth({ verifier: oauthProvider }), async (req: Request, res: Response) => {
+  // ── Dual-mode auth front for /mcp ───────────────────────────────────────
+  // Header present  → Cloudflare Access JWT path (verify → build AuthInfo →
+  //                   set req.auth → skip the bearer middleware entirely).
+  // Header absent   → fall through to the existing OAuth/bearer middleware
+  //                   unchanged (machine clients + internal/direct access).
+  // A present-but-invalid JWT FAILS CLOSED (401) and never falls through.
+  const bearerAuth = requireBearerAuth({ verifier: oauthProvider });
+  const dualModeAuth = async (req: Request, res: Response, next: NextFunction) => {
+    const assertion = req.header(CF_ACCESS_JWT_HEADER);
+    if (!cfAccessVerifier || !assertion) {
+      // No CF Access JWT → existing OAuth/bearer path, unchanged.
+      return bearerAuth(req, res, next);
+    }
+    try {
+      const { authInfo } = await authenticateCfAccess(engine, cfAccessVerifier, cfAccessConfig, assertion);
+      (req as Request & { auth?: AuthInfo }).auth = authInfo;
+      return next();
+    } catch (e) {
+      // Fail closed: a present-but-invalid assertion is a 401, NOT a
+      // fall-through to bearer or anon.
+      const code = e instanceof CfAccessVerifyError ? e.code : 'malformed';
+      res.status(401).json({
+        error: 'invalid_cf_access_jwt',
+        error_description: `Cloudflare Access JWT rejected (${code})`,
+      });
+      return;
+    }
+  };
+
+  app.post('/mcp', dualModeAuth, async (req: Request, res: Response) => {
     const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;
 
