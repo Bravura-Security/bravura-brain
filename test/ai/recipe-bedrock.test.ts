@@ -56,7 +56,11 @@ describe('recipe: bedrock', () => {
     expect(r.touchpoints.chat!.models).toContain('us.anthropic.claude-opus-4-8');
     expect(r.touchpoints.chat!.supports_tools).toBe(true);
     expect(r.touchpoints.chat!.supports_subagent_loop).toBe(true);
-    expect(r.touchpoints.chat!.supports_prompt_cache).toBe(true);
+    // OFF for Bedrock: the gateway's cache_control injection is Anthropic-native
+    // only; the AI-SDK Bedrock provider uses a separate Converse cachePoint path
+    // this recipe doesn't wire. Keeps the "only the anthropic recipe claims prompt
+    // cache" invariant in gateway-chat.test.ts intact.
+    expect(r.touchpoints.chat!.supports_prompt_cache).toBe(false);
   });
 
   test('expansion touchpoint declares Haiku inference profiles', () => {
