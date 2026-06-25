@@ -29,6 +29,7 @@ import {
   rerank,
   RerankError,
   __setRerankTransportForTests,
+  __setBedrockRerankSignerForTests,
 } from '../../src/core/ai/gateway.ts';
 
 function configureZE(model: string = 'zeroentropyai:zerank-2'): void {
@@ -47,6 +48,7 @@ function mockResp(json: unknown, status = 200): Response {
 
 afterEach(() => {
   __setRerankTransportForTests(null);
+  __setBedrockRerankSignerForTests(null);
   resetGateway();
 });
 
@@ -407,5 +409,197 @@ describe('gateway.rerank() — v0.40.6.1 path regression: zerank-1-small unaffec
     });
     await rerank({ query: 'q', documents: ['d'] });
     expect(capturedUrl.endsWith('/models/rerank')).toBe(true);
+  });
+});
+
+describe('gateway.rerank() — native Bedrock Cohere rerank (SigV4 InvokeModel)', () => {
+  // Stub the SigV4 signer so tests exercise the adapter (URL/body/response
+  // mapping + error classification) without resolving real AWS credentials.
+  // captures lets a test assert on what the signer was handed.
+  let signerArgs: { region: string; host: string; path: string; body: string } | null = null;
+  beforeEach(() => {
+    signerArgs = null;
+    __setBedrockRerankSignerForTests(async (a) => {
+      signerArgs = a;
+      return {
+        host: a.host,
+        'content-type': 'application/json',
+        accept: 'application/json',
+        authorization:
+          'AWS4-HMAC-SHA256 Credential=AKIATEST/20260622/' +
+          `${a.region}/bedrock/aws4_request, SignedHeaders=host, Signature=deadbeef`,
+        'x-amz-date': '20260622T000000Z',
+      };
+    });
+  });
+
+  function configureBedrockRerank(
+    model: string = 'bedrock:cohere.rerank-v3-5:0',
+    env: Record<string, string | undefined> = { AWS_REGION: 'ca-central-1' },
+  ): void {
+    configureGateway({ reranker_model: model, env });
+  }
+
+  test('routes cohere.rerank-v3-5:0 to the bedrock-runtime InvokeModel URL', async () => {
+    configureBedrockRerank();
+    let capturedUrl = '';
+    __setRerankTransportForTests(async (url) => {
+      capturedUrl = url;
+      return mockResp({ results: [{ index: 0, relevance_score: 0.9 }] });
+    });
+    await rerank({ query: 'q', documents: ['d'] });
+    expect(capturedUrl).toBe(
+      'https://bedrock-runtime.ca-central-1.amazonaws.com/model/cohere.rerank-v3-5%3A0/invoke',
+    );
+  });
+
+  test('respects AWS_REGION → BEDROCK_REGION → ca-central-1 region resolution', async () => {
+    configureBedrockRerank('bedrock:cohere.rerank-v3-5:0', {
+      BEDROCK_REGION: 'us-west-2',
+    });
+    let capturedUrl = '';
+    __setRerankTransportForTests(async (url) => {
+      capturedUrl = url;
+      return mockResp({ results: [] });
+    });
+    await rerank({ query: 'q', documents: ['d'] });
+    expect(capturedUrl).toContain('bedrock-runtime.us-west-2.amazonaws.com');
+  });
+
+  test('sends the Cohere Bedrock body shape {api_version:2, query, documents, top_n?}', async () => {
+    configureBedrockRerank();
+    let captured: any = null;
+    __setRerankTransportForTests(async (_url, init) => {
+      captured = JSON.parse(init.body as string);
+      return mockResp({ results: [{ index: 0, relevance_score: 0.9 }] });
+    });
+    await rerank({ query: 'q', documents: ['d1', 'd2'], topN: 3 });
+    expect(captured).toEqual({
+      api_version: 2,
+      query: 'q',
+      documents: ['d1', 'd2'],
+      top_n: 3,
+    });
+  });
+
+  test('omits top_n when not provided', async () => {
+    configureBedrockRerank();
+    let captured: any = null;
+    __setRerankTransportForTests(async (_url, init) => {
+      captured = JSON.parse(init.body as string);
+      return mockResp({ results: [{ index: 0, relevance_score: 0.5 }] });
+    });
+    await rerank({ query: 'q', documents: ['d'] });
+    expect('top_n' in captured).toBe(false);
+  });
+
+  test('forwards the SigV4-signed Authorization header to the transport', async () => {
+    configureBedrockRerank();
+    let authHeader: string | null = null;
+    __setRerankTransportForTests(async (_url, init) => {
+      const headers = new Headers(init.headers as HeadersInit);
+      authHeader = headers.get('authorization');
+      return mockResp({ results: [{ index: 0, relevance_score: 1 }] });
+    });
+    await rerank({ query: 'q', documents: ['d'] });
+    expect(authHeader).toMatch(/^AWS4-HMAC-SHA256 /);
+    // Signer was handed the bedrock host + InvokeModel path + the actual body.
+    expect(signerArgs?.host).toBe('bedrock-runtime.ca-central-1.amazonaws.com');
+    expect(signerArgs?.path).toBe('/model/cohere.rerank-v3-5%3A0/invoke');
+    expect(JSON.parse(signerArgs!.body).query).toBe('q');
+  });
+
+  test('maps response.results[].relevance_score → relevanceScore', async () => {
+    configureBedrockRerank();
+    __setRerankTransportForTests(async () =>
+      mockResp({
+        results: [
+          { index: 2, relevance_score: 0.99 },
+          { index: 0, relevance_score: 0.4 },
+        ],
+      }),
+    );
+    const out = await rerank({ query: 'q', documents: ['a', 'b', 'c'] });
+    expect(out).toEqual([
+      { index: 2, relevanceScore: 0.99 },
+      { index: 0, relevanceScore: 0.4 },
+    ]);
+  });
+
+  test('also tolerates camelCase relevanceScore (bedrock-agent-runtime shape)', async () => {
+    configureBedrockRerank();
+    __setRerankTransportForTests(async () =>
+      mockResp({ results: [{ index: 1, relevanceScore: 0.77 }] }),
+    );
+    const out = await rerank({ query: 'q', documents: ['a', 'b'] });
+    expect(out).toEqual([{ index: 1, relevanceScore: 0.77 }]);
+  });
+
+  test('rejects a model not in the bedrock reranker allowlist', async () => {
+    configureBedrockRerank();
+    let called = false;
+    __setRerankTransportForTests(async () => {
+      called = true;
+      return mockResp({ results: [] });
+    });
+    try {
+      await rerank({ query: 'q', documents: ['d'], model: 'bedrock:cohere.rerank-fake:9' });
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(RerankError);
+      expect((err as RerankError).message).toContain('not listed');
+      expect(called).toBe(false);
+    }
+  });
+
+  test('accepts amazon.rerank-v1:0 (secondary allowlist member)', async () => {
+    configureBedrockRerank('bedrock:amazon.rerank-v1:0');
+    let capturedUrl = '';
+    __setRerankTransportForTests(async (url) => {
+      capturedUrl = url;
+      return mockResp({ results: [{ index: 0, relevance_score: 0.6 }] });
+    });
+    const out = await rerank({ query: 'q', documents: ['d'] });
+    expect(out.length).toBe(1);
+    expect(capturedUrl).toContain('/model/amazon.rerank-v1%3A0/invoke');
+  });
+
+  test('5xx → network classification', async () => {
+    configureBedrockRerank();
+    __setRerankTransportForTests(async () => new Response('Server error', { status: 503 }));
+    try {
+      await rerank({ query: 'q', documents: ['d'] });
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect((err as RerankError).reason).toBe('network');
+    }
+  });
+
+  test('403 → auth classification', async () => {
+    configureBedrockRerank();
+    __setRerankTransportForTests(async () => new Response('AccessDenied', { status: 403 }));
+    try {
+      await rerank({ query: 'q', documents: ['d'] });
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect((err as RerankError).reason).toBe('auth');
+    }
+  });
+
+  test('payload over max_payload_bytes throws payload_too_large before transport', async () => {
+    configureBedrockRerank();
+    let called = false;
+    __setRerankTransportForTests(async () => {
+      called = true;
+      return mockResp({ results: [] });
+    });
+    const huge = 'x'.repeat(6 * 1024 * 1024);
+    try {
+      await rerank({ query: 'q', documents: [huge] });
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect((err as RerankError).reason).toBe('payload_too_large');
+      expect(called).toBe(false);
+    }
   });
 });

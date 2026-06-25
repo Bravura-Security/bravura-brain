@@ -144,6 +144,35 @@ export function dimsProviderOptions(
     case 'native-anthropic':
       // Anthropic has no embedding model.
       return undefined;
+    case 'native-bedrock': {
+      // The bedrock provider keys provider options under `bedrock` (not the
+      // openai/openaiCompatible shapes). The `@ai-sdk/amazon-bedrock`
+      // embedding adapter maps `outputDimension` → wire `output_dimension`
+      // for Cohere embed models and `dimensions` → wire `dimensions` for the
+      // Titan family (see amazonBedrockEmbeddingModelOptionsSchema). Forward
+      // the configured dim so Cohere embed-v4 (which defaults to 1536) returns
+      // the vector(1024) the schema expects. Bedrock embeddings are symmetric
+      // here — inputType ignored (the SDK supplies Cohere's required
+      // input_type itself).
+      if (modelId.includes('cohere.embed-')) {
+        // Cohere embed-v4 accepts output_dimension in {256,512,1024,1536};
+        // v3 models are fixed 1024-dim and reject the field — only emit it
+        // for v4+ where it's honored. Matching against the embed family with
+        // a version that supports the param keeps v3 requests clean.
+        if (modelId.includes('embed-v4') || /cohere\.embed-v[5-9]/.test(modelId)) {
+          return { bedrock: { outputDimension: dims } };
+        }
+        // v3 (and other fixed-dim Cohere embed models): no override, native width.
+        return undefined;
+      }
+      // Titan embed v2 (amazon.titan-embed-text-v2:0) accepts a `dimensions`
+      // override (1024/512/256); titan-embed-text-v1 is fixed 1536-dim and
+      // takes no override.
+      if (modelId.includes('titan-embed-text-v2')) {
+        return { bedrock: { dimensions: dims } };
+      }
+      return undefined;
+    }
     case 'openai-compatible':
       // ZE zembed-1 — flexible Matryoshka dims + asymmetric input_type.
       // Lives BEFORE the generic openai-compatible fall-through to avoid
