@@ -1,0 +1,245 @@
+# gbrain-bravura — Bravura Security unified company-brain pack
+#
+# Forked from gbrain-recommended (which it extends) to add the page types,
+# link verbs, and filing rules for a company brain spanning SUPPORT, SALES,
+# and INTERNAL knowledge. The taxonomy is designed to hold all three; the
+# first build slice populates INTERNAL + SUPPORT, with `deal`/`rfp` stubbed
+# for the later sales slice.
+#
+# Activate:  gbrain schema use gbrain-bravura
+#
+# Design + rationale: brain-deploy/docs/BRAVURA_BRAIN_DESIGN.md.
+# Grounded against the real manifest schema (src/core/schema-pack/manifest-v1.ts)
+# and the gbrain-investor lens pack as the structural template.
+#
+# Inherits from the extends chain (gbrain-recommended → gbrain-base):
+#   person, company, deal, meeting, concept, source, project + the
+#   recommended directory prefixes (concepts/, meetings/, deals/, sources/).
+# This pack ADDS Bravura-specific types and verbs; it does not redefine base
+# types.
+
+api_version: gbrain-schema-pack-v1
+name: gbrain-bravura
+version: 1.0.0
+gbrain_min_version: 0.39.0
+extends: gbrain-recommended
+description: "Bravura Security unified company brain. Spans support (cases, patterns, KB), internal knowledge (concepts, processes, products, people, teams), and sales (deals, RFPs — stubbed). Two-layer compiled-truth pages authored by the nightly enrich agent from raw inbox signals; reference content (Paligo / Confluence-KB / SF-KB / Responsive) ingested DB-direct."
+
+# Borrow the base entity types this pack's filing rules + links reference.
+# borrow_from signals intent; the registry already merges types via extends.
+borrow_from:
+  - pack: gbrain-recommended
+    types:
+      - person
+      - company
+      - deal
+      - meeting
+      - concept
+      - source
+
+# Same takes kinds as the chain (fact, take, bet, hunch). Omitted = inherit.
+
+page_types:
+  # ---- Accounts / org (shared by support + sales) ----
+  - name: customer
+    primitive: entity
+    path_prefixes:
+      - customers/
+    aliases: []
+    # Compiled-truth account profile; durable facts (environment, contract,
+    # product footprint) flow from its cases, not from re-extracting the
+    # synthesized page. Surfaces in find_experts only for internal people.
+    extractable: false
+    expert_routing: false
+
+  - name: team
+    primitive: entity
+    path_prefixes:
+      - teams/
+    aliases: []
+    extractable: false
+    # Teams are an expertise locus (who owns which product/process).
+    expert_routing: true
+
+  # ---- Internal knowledge ----
+  - name: product_area
+    primitive: concept
+    path_prefixes:
+      - products/
+    aliases: []
+    # Product/component knowledge: definitions, behaviors, known constraints.
+    extractable: true
+    expert_routing: true
+
+  - name: process
+    primitive: concept
+    path_prefixes:
+      - processes/
+    aliases: []
+    # Runbooks, decisions, internal how-to. Owned by people/teams.
+    extractable: true
+    expert_routing: true
+
+  # ---- Support ----
+  - name: support_case
+    primitive: temporal
+    path_prefixes:
+      - support/cases/
+    aliases: []
+    # Enriched case page (symptom → root cause → resolution). The richest
+    # fact source: extract_facts mines symptom/cause/resolution claims.
+    extractable: true
+    expert_routing: false
+
+  - name: support_pattern
+    primitive: concept
+    path_prefixes:
+      - support/patterns/
+    aliases: []
+    # Recurring issue/resolution cluster distilled across many cases.
+    extractable: true
+    expert_routing: false
+
+  - name: kb_article
+    primitive: media
+    path_prefixes:
+      - kb/
+    aliases: []
+    # Authoritative reference (Paligo / Confluence-KB / SF-KB). Retrieval-only
+    # for now — high volume; fact extraction deferred to avoid noise/cost.
+    extractable: false
+    expert_routing: false
+
+  # ---- Inbox (raw landing; awaits nightly enrich) ----
+  - name: inbox
+    primitive: media
+    path_prefixes:
+      - inbox/
+    aliases: []
+    # Raw unprocessed signals (SF cases land here first; future Granola /
+    # email / Teams). The enrich agent reads these and authors compiled-truth
+    # pages elsewhere; not directly extracted (the agent does that judgment).
+    extractable: false
+    expert_routing: false
+
+  # ---- Sales (STUB — populated in the later sales slice) ----
+  - name: rfp
+    primitive: media
+    path_prefixes:
+      - sales/rfp/
+      - rfp/
+    aliases: []
+    extractable: false
+    expert_routing: false
+
+# No new cycle phases — consumes the existing extract_facts + enrich loop.
+phases: []
+
+# Bravura-specific typed edges. inverse names give the graph both directions;
+# regex inference lets link-extraction wire edges from prose where reliable.
+link_types:
+  - name: for_customer
+    inverse: has_case
+  - name: affects_product
+    inverse: affected_by
+  - name: caused_by
+    inverse: causes
+    inference:
+      regex: \b(caused by|root cause|due to|stemmed from|triggered by)\b
+  - name: resolved_by
+    inverse: resolves
+    inference:
+      regex: \b(resolved by|fixed by|workaround|resolution:)\b
+  - name: escalated_to
+    inverse: handled_by
+    inference:
+      regex: \b(escalated to|escalation to|handed off to|reassigned to)\b
+  - name: member_of
+    inverse: has_member
+  - name: owns
+    inverse: owned_by
+  - name: documents
+    inverse: documented_by
+
+# Frontmatter field → link verb. Page-typed: the SOURCE page's type selects
+# which mapping applies.
+frontmatter_links:
+  - page_type: support_case
+    fields: [customer, account]
+    link_type: for_customer
+  - page_type: support_case
+    fields: [product, product_area, component]
+    link_type: affects_product
+  - page_type: support_case
+    fields: [escalated_to, assignee, owner]
+    link_type: escalated_to
+  - page_type: support_pattern
+    fields: [product, product_area, component]
+    link_type: affects_product
+  - page_type: person
+    fields: [team]
+    link_type: member_of
+  - page_type: team
+    fields: [members, key_people]
+    link_type: has_member
+  - page_type: kb_article
+    fields: [product, product_area]
+    link_type: documents
+  - page_type: process
+    fields: [owner, owned_by]
+    link_type: owned_by
+
+# Fact extraction is on for support_case / support_pattern / product_area /
+# process via their extractable flag above; no override block needed.
+enrichable_types: []
+
+# Filing rules — where the nightly enrich agent files each authored type.
+# Mirrors brain-content's MECE directory layout.
+filing_rules:
+  - kind: customer
+    directory: customers/
+    examples:
+      - customers/acme-example
+    description: "Customer account profiles. One page per account. Frontmatter: customer/account name, product footprint, deployment model, tier. Facts flow in from linked support_case pages (for_customer)."
+  - kind: team
+    directory: teams/
+    examples:
+      - teams/support-tier-2
+    description: "Internal teams / org units. Frontmatter: members (→ has_member). Expert-routing locus for product/process ownership."
+  - kind: product_area
+    directory: products/
+    examples:
+      - products/identity-manager
+      - products/privileged-access
+    description: "Product areas / components. Behaviors, known constraints, owning team. Cases link here via affects_product; KB via documents."
+  - kind: process
+    directory: processes/
+    examples:
+      - processes/case-escalation
+      - processes/release-runbook
+    description: "Runbooks, decisions, internal how-to. Frontmatter: owner (→ owned_by). Extractable — process steps + decisions become facts."
+  - kind: support_case
+    directory: support/cases/
+    examples:
+      - support/cases/2026-06-acme-sso-timeout
+    description: "Enriched case pages distilled from inbox items. Two-layer: compiled truth (symptom → root cause → resolution) above the line, append-only timeline below. Links: for_customer, affects_product, caused_by, resolved_by, escalated_to."
+  - kind: support_pattern
+    directory: support/patterns/
+    examples:
+      - support/patterns/sso-clock-skew
+    description: "Recurring issue/resolution clusters distilled across many cases. Cases caused_by a pattern; pattern resolved_by KB/process."
+  - kind: kb_article
+    directory: kb/
+    examples:
+      - kb/configuring-saml-sso
+    description: "Authoritative reference articles (Paligo / Confluence-KB / SF-KB). Retrieval-only. documents → product_area."
+  - kind: inbox
+    directory: inbox/
+    examples:
+      - inbox/2026-06-29-sfcase-00123456
+    description: "Raw unprocessed signals awaiting nightly enrich. SF cases land here first (date-prefixed). The enrich agent reads inbox/, authors compiled-truth pages, and archives the source item."
+  - kind: rfp
+    directory: sales/rfp/
+    examples:
+      - sales/rfp/acme-security-questionnaire-2026
+    description: "STUB (sales slice). Security questionnaires / RFP responses from Responsive. Populated when the sales slice is built."

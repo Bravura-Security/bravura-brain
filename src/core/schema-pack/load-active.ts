@@ -112,6 +112,9 @@ function defaultPackLocator(name: string): string | null {
     // Ships as install default (Lane E T17) + via gbrain onboard pack
     // upgrade flow (the unify-types Minion handler).
     'gbrain-base-v2',
+    // Bravura Security company-brain pack (fork-local). Support + internal +
+    // sales taxonomy. See brain-deploy/docs/BRAVURA_BRAIN_DESIGN.md.
+    'gbrain-bravura',
   ];
   if (BUNDLED.includes(name)) {
     // Resolve bundled YAML relative to this source file. Works in both
