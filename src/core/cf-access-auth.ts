@@ -333,7 +333,14 @@ export function resolveScopeForIdentity(
   config: Pick<CfAccessConfig, 'defaultRead' | 'groupMap'>,
 ): CfAccessScopeResolution {
   let writeSource = personalSlug;
-  const reads = new Set<string>([config.defaultRead, personalSlug]);
+  // `defaultRead` may be a single source id ("company") OR a comma-separated
+  // list ("company,customer") — every authenticated user reads ALL of them.
+  // Split + trim so a multi-domain company brain (read company AND customer)
+  // is a pure config change (GBRAIN_CF_ACCESS_DEFAULT_READ), no code edit.
+  const reads = new Set<string>([personalSlug]);
+  for (const d of config.defaultRead.split(',').map((s) => s.trim()).filter(Boolean)) {
+    reads.add(d);
+  }
 
   for (const group of identity.groups) {
     const entry = config.groupMap[group];
