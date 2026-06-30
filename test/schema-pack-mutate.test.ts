@@ -103,7 +103,9 @@ describe('locateMutablePackFile — bundled guard', () => {
     expect(BUNDLED_PACK_NAMES.has('gbrain-recommended')).toBe(true);
     // v0.42 (T22): gbrain-base-v2 joins the bundled set.
     expect(BUNDLED_PACK_NAMES.has('gbrain-base-v2')).toBe(true);
-    expect(BUNDLED_PACK_NAMES.size).toBe(3);
+    // fork-local: gbrain-bravura company-brain pack is bundled + read-only.
+    expect(BUNDLED_PACK_NAMES.has('gbrain-bravura')).toBe(true);
+    expect(BUNDLED_PACK_NAMES.size).toBe(4);
   });
 
   it('rejects gbrain-base-v2 with PACK_READONLY (bundled guard)', () => {
