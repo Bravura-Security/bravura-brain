@@ -30,8 +30,13 @@ RUN cd admin && bun run build && cd .. \
 
 # ---- runtime ----
 FROM oven/bun:1.3-slim AS runtime
+# git is REQUIRED at runtime: gbrain shells out to `git` (git-remote.ts) for
+# git-backed sources — `gbrain sync` reads the repo's log/diff/HEAD to compute
+# the import delta. Without it, sync of a git-backed source fails with
+# "No commits in repo". (Clone/pull/SSH is handled by the ingest-image
+# initContainer + sidecar; the gbrain container only does local git reads.)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates git \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/bin/gbrain /usr/local/bin/gbrain
 # Ship the bundled schema-pack YAMLs alongside the binary. `bun build --compile`
