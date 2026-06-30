@@ -54,6 +54,9 @@ describe('recipe: bedrock', () => {
     expect(r.touchpoints.chat).toBeDefined();
     expect(r.touchpoints.chat!.models[0]).toBe('global.anthropic.claude-sonnet-4-6');
     expect(r.touchpoints.chat!.models).toContain('us.anthropic.claude-opus-4-8');
+    // Bravura: Opus 4.8 (enrich agent) + Sonnet 5 (general chat) global profiles.
+    expect(r.touchpoints.chat!.models).toContain('global.anthropic.claude-opus-4-8');
+    expect(r.touchpoints.chat!.models).toContain('global.anthropic.claude-sonnet-5');
     expect(r.touchpoints.chat!.supports_tools).toBe(true);
     expect(r.touchpoints.chat!.supports_subagent_loop).toBe(true);
     // OFF for Bedrock: the gateway's cache_control injection is Anthropic-native
