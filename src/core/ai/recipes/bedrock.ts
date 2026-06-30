@@ -72,7 +72,13 @@ export const bedrock: Recipe = {
       max_batch_tokens: 100_000,
     },
     expansion: {
-      models: ['global.anthropic.claude-haiku-4-5-20251001-v1:0', 'us.anthropic.claude-haiku-4-5-20251001-v1:0'],
+      models: [
+        'global.anthropic.claude-haiku-4-5-20251001-v1:0',
+        'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+        // Sonnet 5 used for query expansion in the Bravura deployment.
+        'global.anthropic.claude-sonnet-5',
+        'us.anthropic.claude-sonnet-5',
+      ],
       cost_per_1m_tokens_usd: 1.0, // Haiku-class on Bedrock (approx.)
       price_last_verified: '2026-06-22',
     },
@@ -85,6 +91,11 @@ export const bedrock: Recipe = {
         'us.anthropic.claude-sonnet-4-6-v1',
         'global.anthropic.claude-haiku-4-5-20251001-v1:0',
         'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+        // Verified ACTIVE on-demand inference profiles in ca-central-1
+        // (2026-06-30): Opus 4.8 (enrich agent) + Sonnet 5 (general chat).
+        'global.anthropic.claude-opus-4-8',
+        'global.anthropic.claude-sonnet-5',
+        'us.anthropic.claude-sonnet-5',
       ],
       supports_tools: true,
       supports_subagent_loop: true,
