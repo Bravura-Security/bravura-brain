@@ -450,6 +450,14 @@ export interface SubagentHandlerData {
    */
   allowed_slug_prefixes?: string[];
   /**
+   * Target source for the agent's writes (put_page etc.). When set, the
+   * subagent's write OperationContext binds to this source instead of the
+   * hardcoded host source `'default'`. Set by `submit_agent` (from the OAuth
+   * client's bound_source_id) and by the `gbrain agent run --source` flag.
+   * Same trust model as allowed_slug_prefixes (PROTECTED_JOB_NAMES / CLI).
+   */
+  source_id?: string;
+  /**
    * v0.41 Approach C: opt out of the auto-generated tool-usage preamble
    * that `buildSystemPrompt()` splices into `system`. Default behavior
    * (omitted or false) prepends a deterministic preamble listing each

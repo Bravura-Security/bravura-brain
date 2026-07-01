@@ -70,6 +70,8 @@ SUBMITTING
     --max-turns <n>              Max assistant turns (default 20)
     --tools a,b,c                Subset of registered tool names (comma list)
     --timeout-ms <n>             Per-job wall-clock timeout
+    --source <id>                Target source for the agent's writes (else host 'default')
+    --allowed-slug-prefixes a/,b/  Write allow-list (comma globs); escapes the wiki/agents/<id>/ sandbox
     --fanout-manifest <path>     JSON array of {prompt, input_vars?} — one child each
     --follow                     Tail status until terminal (default on TTY)
     --detach                     Submit + print job id, exit immediately
@@ -102,6 +104,8 @@ interface RunFlags {
   tools?: string[];
   timeoutMs?: number;
   fanoutManifest?: string;
+  source?: string;
+  allowedSlugPrefixes?: string[];
   follow: boolean;
   detach: boolean;
 }
@@ -167,6 +171,8 @@ function parseRunFlags(args: string[]): { flags: RunFlags; rest: string[] } {
       case '--tools':           flags.tools = requireFlagValue(args, ++i, a).split(',').map(s => s.trim()).filter(Boolean); break;
       case '--timeout-ms':      flags.timeoutMs = parseIntFlagValue(requireFlagValue(args, ++i, a), a); break;
       case '--fanout-manifest': flags.fanoutManifest = requireFlagValue(args, ++i, a); break;
+      case '--source':          flags.source = requireFlagValue(args, ++i, a); break;
+      case '--allowed-slug-prefixes': flags.allowedSlugPrefixes = requireFlagValue(args, ++i, a).split(',').map(s => s.trim()).filter(Boolean); break;
       case '--follow':          flags.follow = true; break;
       case '--no-follow':       flags.follow = false; break;
       case '--detach':          flags.detach = true; flags.follow = false; break;
@@ -213,6 +219,8 @@ export async function runAgentRun(engine: BrainEngine, args: string[]): Promise<
   if (flags.model) data.model = flags.model;
   if (flags.maxTurns) data.max_turns = flags.maxTurns;
   if (flags.tools && flags.tools.length > 0) data.allowed_tools = flags.tools;
+  if (flags.source) data.source_id = flags.source;
+  if (flags.allowedSlugPrefixes && flags.allowedSlugPrefixes.length > 0) data.allowed_slug_prefixes = flags.allowedSlugPrefixes;
 
   const submitOpts: Partial<MinionJobInput> = { max_stalled: 3 };
   if (flags.timeoutMs) submitOpts.timeout_ms = flags.timeoutMs;
@@ -262,6 +270,8 @@ async function runFanout(engine: BrainEngine, queue: MinionQueue, flags: RunFlag
       ...(flags.model ? { model: flags.model } : {}),
       ...(flags.maxTurns ? { max_turns: flags.maxTurns } : {}),
       ...(flags.tools && flags.tools.length > 0 ? { allowed_tools: flags.tools } : {}),
+      ...(flags.source ? { source_id: flags.source } : {}),
+      ...(flags.allowedSlugPrefixes && flags.allowedSlugPrefixes.length > 0 ? { allowed_slug_prefixes: flags.allowedSlugPrefixes } : {}),
     };
     const submitOpts: Partial<MinionJobInput> = { max_stalled: 3 };
     if (flags.timeoutMs) submitOpts.timeout_ms = flags.timeoutMs;
@@ -293,6 +303,8 @@ async function runFanout(engine: BrainEngine, queue: MinionQueue, flags: RunFlag
       ...(flags.model ? { model: flags.model } : {}),
       ...(flags.maxTurns ? { max_turns: flags.maxTurns } : {}),
       ...(flags.tools && flags.tools.length > 0 ? { allowed_tools: flags.tools } : {}),
+      ...(flags.source ? { source_id: flags.source } : {}),
+      ...(flags.allowedSlugPrefixes && flags.allowedSlugPrefixes.length > 0 ? { allowed_slug_prefixes: flags.allowedSlugPrefixes } : {}),
     };
     const submitOpts: Partial<MinionJobInput> = {
       parent_job_id: aggregator.id,
