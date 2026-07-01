@@ -194,6 +194,13 @@ export interface BuildBrainToolsOpts {
    * SubagentHandlerData.allowed_slug_prefixes via the handler.
    */
   allowedSlugPrefixes?: readonly string[];
+  /**
+   * Target source for the agent's writes. When set, the write context binds
+   * to this source instead of the hardcoded host source `'default'`. Flows
+   * from SubagentHandlerData.source_id via the handler (set by submit_agent's
+   * bound_source_id or `gbrain agent run --source`).
+   */
+  sourceId?: string;
 }
 
 interface OpContextDeps {
@@ -204,6 +211,7 @@ interface OpContextDeps {
   signal?: AbortSignal;
   brainId?: string;
   allowedSlugPrefixes?: readonly string[];
+  sourceId?: string;
 }
 
 function buildOpContext(deps: OpContextDeps): OperationContext {
@@ -217,7 +225,9 @@ function buildOpContext(deps: OpContextDeps): OperationContext {
     },
     dryRun: false,
     remote: true,                // match MCP trust boundary for auto-link skip
-    sourceId: 'default',         // v0.34 D4: required; subagent tools default to host source
+    // Bind to the agent's target source when supplied (submit_agent bound source
+    // / `gbrain agent run --source`); else the host source `'default'` (v0.34 D4).
+    sourceId: deps.sourceId ?? 'default',
     jobId: deps.jobId,
     subagentId: deps.subagentId,
     viaSubagent: true,           // FAIL-CLOSED: put_page etc. enforce namespace
@@ -270,6 +280,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
           signal: ctx.signal,
           brainId: opts.brainId,
           allowedSlugPrefixes: opts.allowedSlugPrefixes,
+          sourceId: opts.sourceId,
         });
         const params = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
         return op.handler(opCtx, params);
