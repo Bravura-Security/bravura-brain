@@ -19,6 +19,7 @@ import {
   type ChatMessage,
 } from '../src/core/ai/gateway.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 /**
  * Minimal engine stub for resolveModel: every config key misses so the
@@ -141,12 +142,8 @@ describe('toModelMessages — v6 ModelMessage shape', () => {
 describe('reconfigureGatewayWithEngine — honors GBRAIN_CHAT/EXPANSION_MODEL env (PR-B1 Fix 1)', () => {
   const CHAT = 'GBRAIN_CHAT_MODEL';
   const EXP = 'GBRAIN_EXPANSION_MODEL';
-  const savedChat = process.env[CHAT];
-  const savedExp = process.env[EXP];
 
   afterEach(() => {
-    if (savedChat === undefined) delete process.env[CHAT]; else process.env[CHAT] = savedChat;
-    if (savedExp === undefined) delete process.env[EXP]; else process.env[EXP] = savedExp;
     resetGateway();
   });
 
@@ -154,49 +151,58 @@ describe('reconfigureGatewayWithEngine — honors GBRAIN_CHAT/EXPANSION_MODEL en
     // Seed the gateway with distinct fallbacks so we can prove env — not the
     // seeded fallback and not TIER_DEFAULTS (reasoning=claude-sonnet-4-6,
     // utility=claude-haiku-4-5-20251001) — is what lands.
-    configureGateway({
-      chat_model: 'anthropic:claude-opus-4-7',
-      expansion_model: 'anthropic:claude-opus-4-6',
-      env: {},
-    });
-    process.env[CHAT] = 'bedrock:global.anthropic.claude-sonnet-5';
-    process.env[EXP] = 'bedrock:global.anthropic.claude-haiku-4-5-20251001';
+    await withEnv(
+      { [CHAT]: 'bedrock:global.anthropic.claude-sonnet-5', [EXP]: 'bedrock:global.anthropic.claude-haiku-4-5-20251001' },
+      async () => {
+        configureGateway({
+          chat_model: 'anthropic:claude-opus-4-7',
+          expansion_model: 'anthropic:claude-opus-4-6',
+          env: {},
+        });
 
-    const cfg = await reconfigureGatewayWithEngine(nullConfigEngine());
+        const cfg = await reconfigureGatewayWithEngine(nullConfigEngine());
 
-    expect(cfg.chat_model).toBe('bedrock:global.anthropic.claude-sonnet-5');
-    expect(cfg.expansion_model).toBe('bedrock:global.anthropic.claude-haiku-4-5-20251001');
+        expect(cfg.chat_model).toBe('bedrock:global.anthropic.claude-sonnet-5');
+        expect(cfg.expansion_model).toBe('bedrock:global.anthropic.claude-haiku-4-5-20251001');
+      },
+    );
   });
 
   test('with env UNSET, TIER_DEFAULTS resolve (env step is skipped, not clobbering)', async () => {
-    delete process.env[CHAT];
-    delete process.env[EXP];
-    configureGateway({
-      chat_model: 'anthropic:claude-sonnet-4-6',
-      expansion_model: 'anthropic:claude-haiku-4-5-20251001',
-      env: {},
-    });
+    await withEnv(
+      { [CHAT]: undefined, [EXP]: undefined },
+      async () => {
+        configureGateway({
+          chat_model: 'anthropic:claude-sonnet-4-6',
+          expansion_model: 'anthropic:claude-haiku-4-5-20251001',
+          env: {},
+        });
 
-    const cfg = await reconfigureGatewayWithEngine(nullConfigEngine());
+        const cfg = await reconfigureGatewayWithEngine(nullConfigEngine());
 
-    // reasoning tier default is claude-sonnet-4-6; utility is claude-haiku-4-5-20251001.
-    expect(cfg.chat_model).toBe('anthropic:claude-sonnet-4-6');
-    expect(cfg.expansion_model).toBe('anthropic:claude-haiku-4-5-20251001');
+        // reasoning tier default is claude-sonnet-4-6; utility is claude-haiku-4-5-20251001.
+        expect(cfg.chat_model).toBe('anthropic:claude-sonnet-4-6');
+        expect(cfg.expansion_model).toBe('anthropic:claude-haiku-4-5-20251001');
+      },
+    );
   });
 
   test('chat env does not leak into expansion resolution (separate env keys)', async () => {
-    process.env[CHAT] = 'bedrock:global.anthropic.claude-opus-4-8';
-    delete process.env[EXP];
-    configureGateway({
-      chat_model: 'anthropic:claude-sonnet-4-6',
-      expansion_model: 'anthropic:claude-haiku-4-5-20251001',
-      env: {},
-    });
+    await withEnv(
+      { [CHAT]: 'bedrock:global.anthropic.claude-opus-4-8', [EXP]: undefined },
+      async () => {
+        configureGateway({
+          chat_model: 'anthropic:claude-sonnet-4-6',
+          expansion_model: 'anthropic:claude-haiku-4-5-20251001',
+          env: {},
+        });
 
-    const cfg = await reconfigureGatewayWithEngine(nullConfigEngine());
+        const cfg = await reconfigureGatewayWithEngine(nullConfigEngine());
 
-    expect(cfg.chat_model).toBe('bedrock:global.anthropic.claude-opus-4-8');
-    // Expansion env unset → falls through to utility TIER_DEFAULT, NOT the chat env.
-    expect(cfg.expansion_model).toBe('anthropic:claude-haiku-4-5-20251001');
+        expect(cfg.chat_model).toBe('bedrock:global.anthropic.claude-opus-4-8');
+        // Expansion env unset → falls through to utility TIER_DEFAULT, NOT the chat env.
+        expect(cfg.expansion_model).toBe('anthropic:claude-haiku-4-5-20251001');
+      },
+    );
   });
 });
