@@ -72,6 +72,7 @@ SUBMITTING
     --timeout-ms <n>             Per-job wall-clock timeout
     --source <id>                Target source for the agent's writes (else host 'default')
     --allowed-slug-prefixes a/,b/  Write allow-list (comma globs); escapes the wiki/agents/<id>/ sandbox
+    --budget-usd <n>             Hard dollar cap for the run (this job + descendants); reservations halt on exhaustion
     --fanout-manifest <path>     JSON array of {prompt, input_vars?} — one child each
     --follow                     Tail status until terminal (default on TTY)
     --detach                     Submit + print job id, exit immediately
@@ -106,6 +107,7 @@ interface RunFlags {
   fanoutManifest?: string;
   source?: string;
   allowedSlugPrefixes?: string[];
+  budgetUsd?: number;
   follow: boolean;
   detach: boolean;
 }
@@ -132,6 +134,15 @@ function parseIntFlagValue(v: string, flag: string): number {
   const n = parseInt(v, 10);
   if (Number.isNaN(n)) {
     throw new Error(`gbrain agent run: ${flag} expects a number, got "${v}".`);
+  }
+  return n;
+}
+
+/** Parse a positive USD amount (dollars, may be fractional) for --budget-usd. */
+function parseUsdFlagValue(v: string, flag: string): number {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`gbrain agent run: ${flag} expects a positive dollar amount, got "${v}".`);
   }
   return n;
 }
@@ -173,6 +184,7 @@ function parseRunFlags(args: string[]): { flags: RunFlags; rest: string[] } {
       case '--fanout-manifest': flags.fanoutManifest = requireFlagValue(args, ++i, a); break;
       case '--source':          flags.source = requireFlagValue(args, ++i, a); break;
       case '--allowed-slug-prefixes': flags.allowedSlugPrefixes = requireFlagValue(args, ++i, a).split(',').map(s => s.trim()).filter(Boolean); break;
+      case '--budget-usd':      flags.budgetUsd = parseUsdFlagValue(requireFlagValue(args, ++i, a), a); break;
       case '--follow':          flags.follow = true; break;
       case '--no-follow':       flags.follow = false; break;
       case '--detach':          flags.detach = true; flags.follow = false; break;
@@ -221,6 +233,7 @@ export async function runAgentRun(engine: BrainEngine, args: string[]): Promise<
   if (flags.tools && flags.tools.length > 0) data.allowed_tools = flags.tools;
   if (flags.source) data.source_id = flags.source;
   if (flags.allowedSlugPrefixes && flags.allowedSlugPrefixes.length > 0) data.allowed_slug_prefixes = flags.allowedSlugPrefixes;
+  if (flags.budgetUsd !== undefined) data.budget_usd = flags.budgetUsd;
 
   const submitOpts: Partial<MinionJobInput> = { max_stalled: 3 };
   if (flags.timeoutMs) submitOpts.timeout_ms = flags.timeoutMs;
@@ -272,6 +285,7 @@ async function runFanout(engine: BrainEngine, queue: MinionQueue, flags: RunFlag
       ...(flags.tools && flags.tools.length > 0 ? { allowed_tools: flags.tools } : {}),
       ...(flags.source ? { source_id: flags.source } : {}),
       ...(flags.allowedSlugPrefixes && flags.allowedSlugPrefixes.length > 0 ? { allowed_slug_prefixes: flags.allowedSlugPrefixes } : {}),
+      ...(flags.budgetUsd !== undefined ? { budget_usd: flags.budgetUsd } : {}),
     };
     const submitOpts: Partial<MinionJobInput> = { max_stalled: 3 };
     if (flags.timeoutMs) submitOpts.timeout_ms = flags.timeoutMs;

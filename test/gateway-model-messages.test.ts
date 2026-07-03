@@ -10,8 +10,25 @@
  * Surfaced by the SkillOpt real-LLM eval (Track B). These cases pin the exact
  * v6 shapes that `generateText` accepts (verified against AI SDK 6.0.174).
  */
-import { describe, test, expect } from 'bun:test';
-import { toModelMessages, type ChatMessage } from '../src/core/ai/gateway.ts';
+import { describe, test, expect, afterEach } from 'bun:test';
+import {
+  toModelMessages,
+  configureGateway,
+  resetGateway,
+  reconfigureGatewayWithEngine,
+  type ChatMessage,
+} from '../src/core/ai/gateway.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+import { withEnv } from './helpers/with-env.ts';
+
+/**
+ * Minimal engine stub for resolveModel: every config key misses so the
+ * 6-tier chain falls through to the env-var step. `reconfigureGatewayWithEngine`
+ * only ever calls `getConfig`.
+ */
+function nullConfigEngine(): BrainEngine {
+  return { getConfig: async () => null } as unknown as BrainEngine;
+}
 
 describe('toModelMessages — v6 ModelMessage shape', () => {
   test('string content passes through unchanged', () => {
@@ -119,5 +136,73 @@ describe('toModelMessages — v6 ModelMessage shape', () => {
     expect((out[1] as any).role).toBe('assistant');
     expect((out[2] as any).role).toBe('tool');
     expect((out[2] as any).content[0].output).toEqual({ type: 'json', value: { hits: 0 } });
+  });
+});
+
+describe('reconfigureGatewayWithEngine — honors GBRAIN_CHAT/EXPANSION_MODEL env (PR-B1 Fix 1)', () => {
+  const CHAT = 'GBRAIN_CHAT_MODEL';
+  const EXP = 'GBRAIN_EXPANSION_MODEL';
+
+  afterEach(() => {
+    resetGateway();
+  });
+
+  test('env vars win at step 6 over the caller fallback + TIER_DEFAULTS', async () => {
+    // Seed the gateway with distinct fallbacks so we can prove env — not the
+    // seeded fallback and not TIER_DEFAULTS (reasoning=claude-sonnet-4-6,
+    // utility=claude-haiku-4-5-20251001) — is what lands.
+    await withEnv(
+      { [CHAT]: 'bedrock:global.anthropic.claude-sonnet-5', [EXP]: 'bedrock:global.anthropic.claude-haiku-4-5-20251001' },
+      async () => {
+        configureGateway({
+          chat_model: 'anthropic:claude-opus-4-7',
+          expansion_model: 'anthropic:claude-opus-4-6',
+          env: {},
+        });
+
+        const cfg = await reconfigureGatewayWithEngine(nullConfigEngine());
+
+        expect(cfg.chat_model).toBe('bedrock:global.anthropic.claude-sonnet-5');
+        expect(cfg.expansion_model).toBe('bedrock:global.anthropic.claude-haiku-4-5-20251001');
+      },
+    );
+  });
+
+  test('with env UNSET, TIER_DEFAULTS resolve (env step is skipped, not clobbering)', async () => {
+    await withEnv(
+      { [CHAT]: undefined, [EXP]: undefined },
+      async () => {
+        configureGateway({
+          chat_model: 'anthropic:claude-sonnet-4-6',
+          expansion_model: 'anthropic:claude-haiku-4-5-20251001',
+          env: {},
+        });
+
+        const cfg = await reconfigureGatewayWithEngine(nullConfigEngine());
+
+        // reasoning tier default is claude-sonnet-4-6; utility is claude-haiku-4-5-20251001.
+        expect(cfg.chat_model).toBe('anthropic:claude-sonnet-4-6');
+        expect(cfg.expansion_model).toBe('anthropic:claude-haiku-4-5-20251001');
+      },
+    );
+  });
+
+  test('chat env does not leak into expansion resolution (separate env keys)', async () => {
+    await withEnv(
+      { [CHAT]: 'bedrock:global.anthropic.claude-opus-4-8', [EXP]: undefined },
+      async () => {
+        configureGateway({
+          chat_model: 'anthropic:claude-sonnet-4-6',
+          expansion_model: 'anthropic:claude-haiku-4-5-20251001',
+          env: {},
+        });
+
+        const cfg = await reconfigureGatewayWithEngine(nullConfigEngine());
+
+        expect(cfg.chat_model).toBe('bedrock:global.anthropic.claude-opus-4-8');
+        // Expansion env unset → falls through to utility TIER_DEFAULT, NOT the chat env.
+        expect(cfg.expansion_model).toBe('anthropic:claude-haiku-4-5-20251001');
+      },
+    );
   });
 });

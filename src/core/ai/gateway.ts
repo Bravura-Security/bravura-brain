@@ -455,11 +455,13 @@ export async function reconfigureGatewayWithEngine(engine: BrainEngine): Promise
   // the vector index. Out of scope per v0.31.12 plan ("Embedding tier knob").
   const newExpansion = await resolveModel(engine, {
     configKey: 'models.expansion',
+    envVar: 'GBRAIN_EXPANSION_MODEL',
     tier: 'utility',
     fallback: cfg.expansion_model ?? DEFAULT_EXPANSION_MODEL,
   });
   const newChat = await resolveModel(engine, {
     configKey: 'models.chat',
+    envVar: 'GBRAIN_CHAT_MODEL',
     tier: 'reasoning',
     fallback: cfg.chat_model ?? DEFAULT_CHAT_MODEL,
   });
