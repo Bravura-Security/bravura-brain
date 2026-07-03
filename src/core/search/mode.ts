@@ -747,7 +747,17 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // to post-fix lookups. Same one-time global cold-miss pattern as the bumps
 // above (the hash is global, not per-provider); refills within
 // cache.ttl_seconds (3600s default).
-export const KNOBS_HASH_VERSION = 11;
+//
+// bump 11→12 (per-type retrieval weights / inbox downweight): a new post-fusion
+// stage multiplies each result's score by its page-type's effective weight
+// (DB config `search.type_weights.<type>`, code default inbox=0.4). The stage
+// re-ranks the result set, so a weight-changed write must NOT be served to a
+// lookup under the old weights. Folded via the `tw=` part from
+// KnobsHashContext.typeWeightsFingerprint (non-1.0 entries only, so the
+// built-in inbox=0.4 default participates but a redundant foo=1.0 key does
+// not). Same one-time global cold-miss pattern as prior bumps; refills within
+// cache.ttl_seconds (3600s default).
+export const KNOBS_HASH_VERSION = 12;
 
 /**
  * v0.36 (D8 / CDX-2) — second-arg context for the cache key. The
@@ -776,6 +786,19 @@ export interface KnobsHashContext {
    */
   schemaPack?: string;
   schemaPackVersion?: string;
+  /**
+   * Per-type retrieval weights fingerprint (inbox downweight). A stable,
+   * order-independent string of the non-1.0 effective type weights (built by
+   * `typeWeightsFingerprint` in src/core/search/type-weights.ts). Folded into
+   * the hash so a `gbrain config set search.type_weights.*` change invalidates
+   * cached rankings — the weights re-rank the result set, so a weight-changed
+   * write must NOT be served to a lookup under the old weights. Lives in the
+   * hash CONTEXT (not ResolvedSearchKnobs / ModeBundle) because the weight map
+   * is a dynamic per-type map, not a fixed scalar knob in the mode bundle.
+   * Undefined falls back to the literal 'none' (no weights / all-1.0) for
+   * callers that don't thread it — same shape as schemaPack.
+   */
+  typeWeightsFingerprint?: string;
 }
 
 export function knobsHash(
@@ -863,6 +886,12 @@ export function knobsHash(
     // test/model-pricing.test.ts-style drift guards and the mode tests.
     `rel=${knobs.relationalRetrieval ? 1 : 0}`,
     `reld=${knobs.relational_retrieval_depth ?? 2}`,
+    // v=12 addition (append-only): per-type retrieval weights (inbox
+    // downweight). Fingerprint of the non-1.0 effective type weights, so a
+    // `search.type_weights.*` config change invalidates cached rankings. 'none'
+    // when no weights are active (all 1.0) — identical to a brain with the
+    // built-in default neutralized, which is the correct no-op equivalence.
+    `tw=${ctx?.typeWeightsFingerprint ?? 'none'}`,
   ];
   const h = createHash('sha256');
   h.update(parts.join('|'));
