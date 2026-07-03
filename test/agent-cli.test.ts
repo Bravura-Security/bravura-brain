@@ -14,9 +14,10 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
-import { __testing as agentTesting } from '../src/commands/agent.ts';
+import { __testing as agentTesting, runAgentRun } from '../src/commands/agent.ts';
 import { parseSince } from '../src/commands/agent-logs.ts';
 import { isProtectedJobName, PROTECTED_JOB_NAMES } from '../src/core/minions/protected-names.ts';
+import { setOwnerBudget, reserveBudget } from '../src/core/minions/budget-tracker.ts';
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
@@ -136,6 +137,25 @@ describe('parseRunFlags', () => {
   test('--fanout-manifest parsed', () => {
     const { flags } = agentTesting.parseRunFlags(['--fanout-manifest', '/tmp/m.json']);
     expect(flags.fanoutManifest).toBe('/tmp/m.json');
+  });
+
+  test('--budget-usd parses a fractional dollar amount (PR-B1 Fix 6)', () => {
+    const { flags, rest } = agentTesting.parseRunFlags(['--budget-usd', '5.50', 'do', 'work']);
+    expect(flags.budgetUsd).toBe(5.5);
+    expect(rest).toEqual(['do', 'work']);
+  });
+
+  test('--budget-usd rejects a non-number', () => {
+    expect(() => agentTesting.parseRunFlags(['--budget-usd', 'lots', 'x'])).toThrow(/positive dollar amount/);
+  });
+
+  test('--budget-usd rejects zero / negative amounts', () => {
+    expect(() => agentTesting.parseRunFlags(['--budget-usd', '0', 'x'])).toThrow(/positive dollar amount/);
+    expect(() => agentTesting.parseRunFlags(['--budget-usd', '-3', 'x'])).toThrow(/positive dollar amount/);
+  });
+
+  test('--budget-usd missing its value throws', () => {
+    expect(() => agentTesting.parseRunFlags(['--budget-usd'])).toThrow(/requires a value/);
   });
 });
 
@@ -324,5 +344,77 @@ describe('fan-out manifest shape (integration)', () => {
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe('--budget-usd threading (PR-B1 Fix 6, integration)', () => {
+  /** Read a job's `data` JSON regardless of string/jsonb representation. */
+  async function jobData(id: number): Promise<Record<string, unknown>> {
+    const rows = await engine.executeRaw<{ data: unknown }>(
+      `SELECT data FROM minion_jobs WHERE id = $1`, [id],
+    );
+    const raw = rows[0]!.data;
+    return (typeof raw === 'string' ? JSON.parse(raw) : raw) as Record<string, unknown>;
+  }
+
+  test('runAgentRun --detach --budget-usd stamps budget_usd into the job payload', async () => {
+    // Non-TTY test env → runAgentRun takes the detach branch (prints job id,
+    // returns) without running the handler loop. We assert the payload field
+    // the handler will read at job start.
+    const out: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (s: string) => { out.push(String(s)); return true; };
+    try {
+      await runAgentRun(engine, ['--budget-usd', '7.25', '--detach', 'summarize', 'the', 'inbox']);
+    } finally {
+      process.stdout.write = origWrite;
+    }
+    const jobId = parseInt(out.join('').trim(), 10);
+    expect(Number.isFinite(jobId)).toBe(true);
+
+    const data = await jobData(jobId);
+    expect(data.budget_usd).toBe(7.25);
+    expect(data.prompt).toBe('summarize the inbox');
+  });
+
+  test('no --budget-usd → no budget_usd field (ungated run stays unlimited)', async () => {
+    const out: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (s: string) => { out.push(String(s)); return true; };
+    try {
+      await runAgentRun(engine, ['--detach', 'do', 'something']);
+    } finally {
+      process.stdout.write = origWrite;
+    }
+    const jobId = parseInt(out.join('').trim(), 10);
+    const data = await jobData(jobId);
+    expect(data.budget_usd).toBeUndefined();
+  });
+
+  test('payload budget → setOwnerBudget (as the handler calls) → reservations enforce', async () => {
+    // End-to-end of the enforcement chain the handler wires at job start:
+    // budget_usd on the payload → setOwnerBudget(engine, jobId, budget_usd) →
+    // reserveBudget CAS decrements the owner balance and exhausts on overspend.
+    const out: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (s: string) => { out.push(String(s)); return true; };
+    try {
+      await runAgentRun(engine, ['--budget-usd', '0.50', '--detach', 'work']);
+    } finally {
+      process.stdout.write = origWrite;
+    }
+    const jobId = parseInt(out.join('').trim(), 10);
+    const data = await jobData(jobId);
+
+    // Replicate the handler's job-start call.
+    await setOwnerBudget(engine, jobId, data.budget_usd as number);
+
+    // Owner is now self-referential with a 50¢ balance; reservations enforce.
+    const first = await reserveBudget(engine, jobId, 30);
+    expect(first.kind).toBe('reserved');
+    if (first.kind === 'reserved') expect(first.new_balance_cents).toBe(20);
+
+    const second = await reserveBudget(engine, jobId, 30); // only 20¢ left → CAS miss
+    expect(second.kind).toBe('exhausted');
   });
 });
