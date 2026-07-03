@@ -53,6 +53,7 @@ import { buildSystemPrompt, DEFAULT_SUBAGENT_SYSTEM } from '../system-prompt.ts'
 import { toolLoop as gatewayToolLoop } from '../../ai/gateway.ts';
 import type { ChatToolDef, ChatMessage, ChatBlock, ChatResult, ToolHandler } from '../../ai/gateway.ts';
 import { classifyCapabilities } from '../../ai/capabilities.ts';
+import { setOwnerBudget } from '../budget-tracker.ts';
 import { randomUUIDv7 } from 'bun';
 
 // ── Defaults ────────────────────────────────────────────────
@@ -177,6 +178,15 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     const data = (ctx.data ?? {}) as unknown as SubagentHandlerData;
     if (!data.prompt || typeof data.prompt !== 'string') {
       throw new Error('subagent job data.prompt is required (string)');
+    }
+
+    // Dollar cap (`gbrain agent run --budget-usd N`): make THIS job its own
+    // budget owner/root at job start so per-turn `reserveBudget` reservations
+    // (driven by the gateway budget cathedral) serialize against the remaining
+    // balance and any children inherit the owner. Omitted = ungated (no owner
+    // row → reservations return `no_budget` and the worker proceeds).
+    if (typeof data.budget_usd === 'number' && data.budget_usd > 0) {
+      await setOwnerBudget(engine, ctx.id, data.budget_usd);
     }
 
     // v0.38 (S1.5 + S1.7) — capability-based gate replaces the v0.31.12

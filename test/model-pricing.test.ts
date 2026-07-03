@@ -86,6 +86,54 @@ describe('canonicalLookup — id normalization', () => {
   });
 });
 
+describe('canonicalLookup — Bedrock (Anthropic via AWS Bedrock)', () => {
+  test('bedrock global Sonnet 5 → $3/$15 (native Anthropic rate)', () => {
+    expect(canonicalLookup('bedrock:global.anthropic.claude-sonnet-5')).toEqual({
+      input: 3.0,
+      output: 15.0,
+    });
+  });
+
+  test('bedrock global Opus 4.8 → $5/$25', () => {
+    expect(canonicalLookup('bedrock:global.anthropic.claude-opus-4-8')).toEqual({
+      input: 5.0,
+      output: 25.0,
+    });
+  });
+
+  test('us.* inference-profile prices equal global.* (billed identically)', () => {
+    expect(canonicalLookup('bedrock:us.anthropic.claude-sonnet-5')).toEqual(
+      canonicalLookup('bedrock:global.anthropic.claude-sonnet-5'),
+    );
+    expect(canonicalLookup('bedrock:us.anthropic.claude-opus-4-8')).toEqual(
+      canonicalLookup('bedrock:global.anthropic.claude-opus-4-8'),
+    );
+  });
+
+  test('explicit bedrock rows match the underlying bare anthropic rows', () => {
+    expect(canonicalLookup('bedrock:global.anthropic.claude-opus-4-8')).toEqual(
+      canonicalLookup('anthropic:claude-opus-4-8'),
+    );
+  });
+
+  test('prefix-normalization fallback: unlisted bedrock profile folds to bare anthropic row', () => {
+    // No explicit `bedrock:global.anthropic.claude-opus-4-7` row exists, but the
+    // profile-prefix normalizer maps it down to the priced `anthropic:` row.
+    expect(canonicalLookup('bedrock:global.anthropic.claude-opus-4-7')).toEqual({
+      input: 5.0,
+      output: 25.0,
+    });
+    expect(canonicalLookup('bedrock:us.anthropic.claude-sonnet-4-6')).toEqual({
+      input: 3.0,
+      output: 15.0,
+    });
+  });
+
+  test('bedrock profile for an unpriced anthropic model → miss (no fabrication)', () => {
+    expect(canonicalLookup('bedrock:global.anthropic.claude-nonexistent-9')).toBeUndefined();
+  });
+});
+
 describe('DRIFT GUARD — derived views stay equal to canonical (re-hardcode trip-wire)', () => {
   test('ANTHROPIC_PRICING (bare) equals canonical anthropic: entries', () => {
     for (const [key, p] of Object.entries(CANONICAL_PRICING)) {

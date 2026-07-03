@@ -64,6 +64,21 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   'anthropic:claude-3-5-sonnet-20241022': { input:  3.00, output: 15.00 },
   'anthropic:claude-3-5-haiku-20241022':  { input:  0.80, output:  4.00 },
 
+  // ── Bedrock (Anthropic via AWS Bedrock) ──────────────────────────────────
+  // Bedrock ships cross-region-inference profile ids like
+  // `global.anthropic.claude-sonnet-5` / `us.anthropic.claude-opus-4-8`.
+  // Native Anthropic per-token rates apply (Bedrock passes vendor pricing
+  // through); the `global.` and `us.` inference-profile prefixes are billed
+  // identically, so the aliases stay in lockstep. `canonicalLookup` also
+  // normalizes any `bedrock:{global,us}.anthropic.<model>` down to the bare
+  // `anthropic:<model>` row as a fallback, so future model ids priced above
+  // are covered without a new Bedrock row — these explicit entries pin the
+  // two models in active deployment and keep the drift guard honest.
+  'bedrock:global.anthropic.claude-sonnet-5': { input:  3.00, output: 15.00 },
+  'bedrock:us.anthropic.claude-sonnet-5':     { input:  3.00, output: 15.00 },
+  'bedrock:global.anthropic.claude-opus-4-8': { input:  5.00, output: 25.00 },
+  'bedrock:us.anthropic.claude-opus-4-8':     { input:  5.00, output: 25.00 },
+
   // ── OpenAI ─────────────────────────────────────────────────────────────
   'openai:gpt-4o':                        { input:  2.50, output: 10.00 },
   'openai:gpt-4o-mini':                   { input:  0.15, output:  0.60 },
@@ -110,5 +125,17 @@ export function canonicalLookup(
   const { provider, model } = splitProviderModelId(modelId);
   if (!model) return undefined;
   const key = provider ? `${provider}:${model}` : `anthropic:${model}`;
-  return CANONICAL_PRICING[key];
+  const hit = CANONICAL_PRICING[key];
+  if (hit) return hit;
+  // 3. Bedrock cross-region-inference profiles carry a `global.anthropic.` or
+  //    `us.anthropic.` prefix on the model tail (e.g. provider `bedrock`, model
+  //    `global.anthropic.claude-sonnet-5`). These are billed at native Anthropic
+  //    rates, so fold the profile prefix down to the bare `anthropic:<model>`
+  //    row. Explicit `bedrock:*` keys above still win via step 1; this catches
+  //    any future Anthropic-on-Bedrock id already priced under `anthropic:`.
+  if (provider === 'bedrock') {
+    const m = model.match(/^(?:global|us)\.anthropic\.(.+)$/);
+    if (m) return CANONICAL_PRICING[`anthropic:${m[1]}`];
+  }
+  return undefined;
 }
