@@ -791,6 +791,16 @@ export interface SearchResult {
    */
   title_match_boost?: number;
   /**
+   * Per-type retrieval weight (inbox downweight) — multiplier applied by
+   * applyTypeWeight from the DB-config `search.type_weights.<type>` map
+   * (code default: inbox=0.4, others 1.0). Only stamped when the effective
+   * weight is not 1.0 (a 1.0 weight is a no-op). Distinct from the metadata
+   * boosts: NOT floor-ratio-gated, so a downweight reaches every matching
+   * result. base_score is preserved (dedup/evidence keys off it, not the
+   * weighted score).
+   */
+  type_weight?: number;
+  /**
    * T3 (retrieval-maxpool incident) — set when this result was surfaced or
    * boosted by the free-text alias hop (the query exactly matched a page's
    * declared alias in page_aliases). An injected canonical that wasn't in the

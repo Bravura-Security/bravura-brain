@@ -401,6 +401,14 @@ export interface PostFusionOpts {
    * metadata stages so a title hit can't bury a strong semantic match.
    */
   titleBoost?: number;
+  /**
+   * Per-type retrieval weights (inbox downweight). Effective map of
+   * page-type → multiplier, resolved from `search.type_weights.<type>` DB
+   * config merged over code defaults (inbox=0.4, others 1.0). Undefined /
+   * empty disables the stage. NOT floor-ratio-gated — a downweight must
+   * reach every matching result. See src/core/search/type-weights.ts.
+   */
+  typeWeights?: Record<string, number>;
 }
 
 export async function runPostFusionStages(
@@ -481,6 +489,19 @@ export async function runPostFusionStages(
   if (opts.query && opts.titleBoost && opts.titleBoost > 1.0) {
     try {
       applyTitleBoost(results, opts.query, opts.titleBoost, floorThreshold);
+    } catch {
+      // Non-fatal; preserves the per-stage contract.
+    }
+  }
+
+  // Per-type retrieval weights (inbox downweight). Runs after the metadata /
+  // title stages as an ungated multiply — a downweight must reach every
+  // matching result (unlike the floor-gated boosts above). Pure + in-memory;
+  // guarded so a malformed weight map can't throw the whole pipeline.
+  if (opts.typeWeights) {
+    try {
+      const { applyTypeWeight } = await import('./type-weights.ts');
+      applyTypeWeight(results, opts.typeWeights);
     } catch {
       // Non-fatal; preserves the per-stage contract.
     }
@@ -823,6 +844,14 @@ export async function hybridSearch(
     },
   });
 
+  // Per-type retrieval weights (inbox downweight). Effective map resolved
+  // from `search.type_weights.<type>` DB config merged over code defaults
+  // (inbox=0.4). Loaded here — in BARE hybridSearch — so eval-replay /
+  // eval-longmemeval (which call bare hybridSearch) exercise the same
+  // ranking as production. Threaded into postFusionOpts below.
+  const { loadTypeWeights } = await import('./type-weights.ts');
+  const typeWeights = await loadTypeWeights(engine).catch(() => ({}));
+
   // v0.36 (D7+D11): resolve embedding column once at entry. Single
   // round-trip to read DB-plane config (mirrors loadSearchModeConfig).
   // Resolver throws on unknown name with a paste-ready hint; let it
@@ -984,6 +1013,9 @@ export async function hybridSearch(
     // The raw query drives the matcher; default factor when the knob is unset.
     query,
     titleBoost: resolvedMode.title_boost,
+    // Per-type retrieval weights (inbox downweight) — effective map from
+    // DB config merged over code defaults. Ungated multiply stage.
+    typeWeights,
   };
 
   // v0.43 — build the relational recall arm ONCE here, before any return
@@ -1594,11 +1626,20 @@ export async function hybridSearchCached(
   const resolvedColCached = resolveEmbeddingColumn(opts, cfgCached);
   const isNonDefaultColumn = !isCacheSafe(resolvedColCached, cfgCached);
 
+  // Per-type retrieval weights (inbox downweight): load the effective map so
+  // its fingerprint folds into the cache key. A `search.type_weights.*` change
+  // re-ranks the result set, so a weight-changed write must not be served to a
+  // lookup under the old weights. Loaded once here; the fresh path re-loads
+  // inside bare hybridSearch (same tiny round-trip) to apply the stage.
+  const { loadTypeWeights, typeWeightsFingerprint } = await import('./type-weights.ts');
+  const cacheTypeWeights = await loadTypeWeights(engine).catch(() => ({}));
+
   // Cache key carries the column + provider so different embedding spaces
   // never collide on the same `(source_id, query_text)` row.
   const cacheKnobsHash = knobsHash(resolvedForCache, {
     embeddingColumn: resolvedColCached.name,
     embeddingModel: resolvedColCached.embeddingModel,
+    typeWeightsFingerprint: typeWeightsFingerprint(cacheTypeWeights),
   });
 
   // Cache decision: opts.useCache (explicit) wins over global config; global

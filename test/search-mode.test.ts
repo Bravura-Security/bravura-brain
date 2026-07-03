@@ -407,7 +407,25 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // now produces query-side vectors for asymmetric providers (zembed-1,
     // Voyage v3+), so rows keyed on pre-fix document-side query vectors
     // must not be served to post-fix lookups.
-    expect(KNOBS_HASH_VERSION).toBe(11);
+    // per-type retrieval weights: bumped 11→12 for the inbox-downweight stage
+    // (tw= fingerprint) — a `search.type_weights.*` change re-ranks results, so
+    // a weight-changed write must not be served to an old-weights lookup.
+    expect(KNOBS_HASH_VERSION).toBe(12);
+  });
+
+  test('type-weights fingerprint changes the hash (cache invalidates on weight change)', () => {
+    // A `search.type_weights.*` change re-ranks the result set; the tw= context
+    // part bifurcates the cache key so a weight-changed write can't be served
+    // to a lookup under the old weights.
+    const base = resolveSearchMode({ mode: 'balanced' });
+    const none = knobsHash(base, { typeWeightsFingerprint: 'none' });
+    const inbox04 = knobsHash(base, { typeWeightsFingerprint: 'inbox=0.4000' });
+    const inbox02 = knobsHash(base, { typeWeightsFingerprint: 'inbox=0.2000' });
+    expect(none).not.toBe(inbox04);
+    expect(inbox04).not.toBe(inbox02);
+    // Absent context field falls back to 'none' — same hash as explicit 'none'.
+    const bareCtx = knobsHash(base, { embeddingColumn: 'embedding' });
+    expect(bareCtx).toBe(none);
   });
 
   test('T1 (codex): floor_ratio set vs unset produces DIFFERENT hashes (cache contamination prevention)', () => {
@@ -572,8 +590,8 @@ describe('v0.40.4 — graph_signals knob', () => {
 });
 
 describe('v0.42.3.0 — autocut knobs', () => {
-  test('KNOBS_HASH_VERSION is 11 (10→11 asymmetric input_type fix, #1400)', () => {
-    expect(KNOBS_HASH_VERSION).toBe(11);
+  test('KNOBS_HASH_VERSION is 12 (11→12 per-type retrieval weights)', () => {
+    expect(KNOBS_HASH_VERSION).toBe(12);
   });
 
   test('bundle defaults: conservative off, balanced/tokenmax on @0.20', () => {
