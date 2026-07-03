@@ -37,6 +37,16 @@ describe('lookupEmbeddingPrice — first-class providers', () => {
     expect(r.kind).toBe('known');
     if (r.kind === 'known') expect(r.pricePerMTok).toBe(0.05);
   });
+
+  test('Cohere Embed v4 on Bedrock at $0.12/MTok (inference-profile id keeps :0 suffix)', () => {
+    const r = lookupEmbeddingPrice('bedrock:global.cohere.embed-v4:0');
+    expect(r.kind).toBe('known');
+    if (r.kind === 'known') {
+      expect(r.pricePerMTok).toBe(0.12);
+      // Splitter cuts on the FIRST colon, so the version-suffixed tail is intact.
+      expect(r.key).toBe('bedrock:global.cohere.embed-v4:0');
+    }
+  });
 });
 
 describe('lookupEmbeddingPrice — fall-through behavior', () => {

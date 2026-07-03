@@ -489,6 +489,16 @@ export interface SubagentHandlerData {
    * Read by audit + diagnostic surfaces (jobs get / dashboard).
    */
   self_fix_cluster?: string;
+  /**
+   * Dollar cost cap for the whole run (this job + all descendants), set by
+   * `gbrain agent run --budget-usd N`. At job start the subagent handler calls
+   * `setOwnerBudget` so this job becomes the budget owner/root; per-turn
+   * `reserveBudget` reservations then serialize against the remaining balance
+   * and children inherit the owner. Omitted = unlimited (reservations return
+   * `no_budget` and the worker proceeds ungated). Same trust model as the
+   * other CLI-only fields (PROTECTED_JOB_NAMES / trusted submit).
+   */
+  budget_usd?: number;
 }
 
 /**

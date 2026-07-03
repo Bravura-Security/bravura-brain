@@ -37,6 +37,12 @@ export const EMBEDDING_PRICING: Record<string, EmbeddingPricing> = {
   'voyage:voyage-4-large':         { pricePerMTok: 0.18 },
   // ZeroEntropy (https://zeroentropy.dev/pricing — zembed-1)
   'zeroentropyai:zembed-1':        { pricePerMTok: 0.05 },
+  // Cohere Embed v4 via AWS Bedrock (cross-region inference profile id
+  // `global.cohere.embed-v4:0`). ~$0.12/M tokens — matches the recipe's
+  // cost_per_1m_tokens_usd (src/core/ai/recipes/bedrock.ts, verified
+  // 2026-06-22 in ca-central-1). Key preserves the `:0` version suffix on
+  // the model tail (lookupEmbeddingPrice splits on the FIRST colon only).
+  'bedrock:global.cohere.embed-v4:0': { pricePerMTok: 0.12 },
 };
 
 export type PriceLookupResult =
@@ -48,9 +54,13 @@ export type PriceLookupResult =
  * `provider:model` and bare `model` forms (bare assumes openai).
  */
 export function lookupEmbeddingPrice(modelString: string): PriceLookupResult {
-  const [providerRaw, modelRaw] = modelString.includes(':')
-    ? modelString.split(':', 2)
-    : ['openai', modelString];
+  // Split on the FIRST colon only: Bedrock inference-profile ids carry a
+  // version suffix (`bedrock:global.cohere.embed-v4:0`) whose trailing `:0`
+  // must stay in the model tail. `split(':', 2)` would truncate it.
+  const colon = modelString.indexOf(':');
+  const [providerRaw, modelRaw] = colon === -1
+    ? ['openai', modelString]
+    : [modelString.slice(0, colon), modelString.slice(colon + 1)];
   const provider = providerRaw.trim().toLowerCase();
   const model = (modelRaw ?? '').trim();
   const key = `${provider}:${model}`;
