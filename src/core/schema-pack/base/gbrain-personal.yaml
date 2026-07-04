@@ -18,7 +18,7 @@
 
 api_version: gbrain-schema-pack-v1
 name: gbrain-personal
-version: 1.0.0
+version: 1.1.0
 gbrain_min_version: 0.39.0
 extends: gbrain-recommended
 description: "Per-user personal brain. Compiled-truth pages (people, companies, meetings, daily log, concepts, projects) authored by the nightly personal-enrich agent from raw inbox signals collected client-side via the user's own MCPs (Granola, Microsoft 365). Facts come from each source's structured fields — never inferred."
@@ -62,13 +62,20 @@ link_types: []
 
 # Frontmatter field → link verb, page-typed by the SOURCE page. Attendees and
 # employers come ONLY from the source's structured fields (never inferred).
+# v1.1: direction + target_dirs make these rules fully self-describing now
+# that pack frontmatter_links are wired into extraction. `attendees` /
+# `company` are also covered by the engine's base field map (which wins per
+# field); `participants` / `employer` / `works_at` are pack-only coverage.
 frontmatter_links:
   - page_type: meeting
     fields: [attendees, participants]
     link_type: attended
+    direction: incoming        # person --attended--> meeting
+    target_dirs: [people/]
   - page_type: person
     fields: [company, employer, works_at]
     link_type: works_at
+    target_dirs: [companies/]
 
 enrichable_types: []
 

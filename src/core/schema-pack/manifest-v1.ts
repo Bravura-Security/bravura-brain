@@ -147,6 +147,27 @@ const FrontmatterLinkSchema = z.object({
   page_type: z.string(),
   fields: z.array(z.string()).min(1),
   link_type: z.string(),
+  /**
+   * Edge direction. 'outgoing' (default): the page carrying the frontmatter
+   * is the FROM side (support_case --for_customer--> customer). 'incoming':
+   * the resolved value is the FROM side (meeting.attendees → person
+   * --attended--> meeting), preserving subject-of-verb semantics.
+   * Optional (not .default) so manifest sha8s of packs that don't declare it
+   * stay stable; consumers apply `?? 'outgoing'` at the read site.
+   */
+  direction: z.enum(['outgoing', 'incoming']).optional(),
+  /**
+   * Directory prefixes that scope target resolution (e.g. ['customers/']).
+   * Threaded to the slug resolver as its dirHint so a frontmatter value like
+   * "DocuSign" resolves within these prefixes first and fuzzy-matching stays
+   * prefix-scoped (see the whole-table-collapse incident documented on
+   * CONNECTOR_METADATA_KEYS in link-extraction.ts). Trailing slashes are
+   * stripped at conversion time. Declared as directories (not page-type
+   * names) because extends-chain resolution does not merge parent
+   * page_types, so a child pack could not reference an inherited type's
+   * path_prefixes here.
+   */
+  target_dirs: z.array(z.string()).optional(),
 }).strict();
 
 const EnrichableSchema = z.object({
@@ -390,6 +411,7 @@ export const SchemaPackManifestSchema = z.object({
 export type SchemaPackManifest = z.infer<typeof SchemaPackManifestSchema>;
 export type PackPageType = z.infer<typeof PageTypeSchema>;
 export type PackLinkType = z.infer<typeof LinkTypeSchema>;
+export type PackFrontmatterLink = z.infer<typeof FrontmatterLinkSchema>;
 
 /**
  * Validation error envelope. Mirrors `StructuredAgentError` shape from

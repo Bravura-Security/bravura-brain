@@ -16,7 +16,7 @@ import { expandQuery } from './search/expansion.ts';
 import { dedupResults } from './search/dedup.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
-import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
+import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef, type PackFrontmatterSource } from './link-extraction.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
@@ -831,6 +831,11 @@ const put_page: Operation = {
     // page_types. Best-effort: pack load failure falls back to legacy inferType
     // (parity gate preserved). Federated-read closure correction is T19's scope.
     let activePack: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> } | undefined;
+    // Full resolved manifest, kept for runAutoLink so pack-declared
+    // frontmatter_links (e.g. gbrain-bravura's support_case.account →
+    // for_customer) produce edges at write time. Same best-effort contract
+    // as activePack: undefined on load failure → base-map-only extraction.
+    let activePackManifest: PackFrontmatterSource | undefined;
     try {
       const { loadActivePack } = await import('./schema-pack/load-active.ts');
       const { loadConfig } = await import('./config.ts');
@@ -840,9 +845,11 @@ const put_page: Operation = {
         sourceId: ctx.sourceId,
       });
       activePack = { page_types: resolved.manifest.page_types };
+      activePackManifest = resolved.manifest;
     } catch {
       // Pack load failed; fall through to legacy inferType behavior.
       activePack = undefined;
+      activePackManifest = undefined;
     }
     const result = await importFromContent(ctx.engine, slug, p.content as string, {
       noEmbed,
@@ -966,7 +973,10 @@ const put_page: Operation = {
       try {
         const enabled = await isAutoLinkEnabled(ctx.engine);
         if (enabled) {
-          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, ctx.sourceId ? { sourceId: ctx.sourceId } : undefined);
+          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, {
+            ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
+            ...(activePackManifest ? { pack: activePackManifest } : {}),
+          });
         }
       } catch (e) {
         autoLinks = { error: e instanceof Error ? e.message : String(e) };
@@ -1099,7 +1109,7 @@ async function runAutoLink(
   engine: BrainEngine,
   slug: string,
   parsed: { type: PageType; compiled_truth: string; timeline: string; frontmatter: Record<string, unknown> },
-  opts?: { sourceId?: string },
+  opts?: { sourceId?: string; pack?: PackFrontmatterSource },
 ): Promise<{ created: number; removed: number; errors: number; unresolved: UnresolvedFrontmatterRef[] }> {
   const fullContent = parsed.compiled_truth + '\n' + parsed.timeline;
   // v0.31.8 (codex OV-2): thread sourceId through every read + write inside
@@ -1124,7 +1134,9 @@ async function runAutoLink(
   const globalBasename = await isGlobalBasenameEnabled(engine);
   const { candidates, unresolved } = await extractPageLinks(
     slug, fullContent, parsed.frontmatter, parsed.type, resolver,
-    { globalBasename },
+    // Pack-declared frontmatter_links rules (active schema pack) extend the
+    // hardcoded field map — see extractFrontmatterLinks for precedence.
+    { globalBasename, ...(opts?.pack ? { pack: opts.pack } : {}) },
   );
 
   // Resolve which targets exist (skip refs to non-existent pages to avoid FK

@@ -40,6 +40,9 @@
 
 import type { SchemaPackManifest } from './manifest-v1.ts';
 import { PageRegexBudget, runRegexBounded } from './redos-guard.ts';
+// Type-only import — no runtime cycle with link-extraction.ts (which
+// imports `frontmatterMappingsFromPack` from this module at runtime).
+import type { FrontmatterFieldMapping } from '../link-extraction.ts';
 
 /**
  * Try to resolve a link verb from the active pack's declared
@@ -115,4 +118,41 @@ export function frontmatterLinkTypeFromPack(
     if (fl.fields.includes(fieldName)) return fl.link_type;
   }
   return null;
+}
+
+/**
+ * Convert a pack's declared `frontmatter_links[]` into the
+ * `FrontmatterFieldMapping` shape `extractFrontmatterLinks` iterates —
+ * the wiring that makes pack rules produce real edges instead of being
+ * documentation-only (pre-fix, pack-declared frontmatter links were
+ * NEVER consulted by any extraction path).
+ *
+ * Conversion rules:
+ *   - `direction` defaults to 'outgoing' (the page carrying the
+ *     frontmatter is the FROM side) — matches how every current pack
+ *     rule reads (support_case --for_customer--> customer, etc.).
+ *   - `target_dirs` become the resolver dirHint with trailing slashes
+ *     stripped ('customers/' → 'customers') so they compose with the
+ *     resolver's `${hint}/${slugified}` + prefix-scoped fuzzy steps.
+ *     An empty/omitted list yields an empty dirHint array — resolution
+ *     is then unscoped, same as the base map's `related`/`see_also`.
+ *
+ * Precedence vs the hardcoded FRONTMATTER_LINK_MAP is decided by the
+ * consumer (extractFrontmatterLinks): base-map-first per field, because
+ * base entries carry production-tuned direction + multi-dir hints that a
+ * pack rule may not express — pack rules ADD coverage for fields the
+ * base map does not handle for that page type.
+ */
+export function frontmatterMappingsFromPack(
+  pack: Pick<SchemaPackManifest, 'frontmatter_links'>,
+): FrontmatterFieldMapping[] {
+  return pack.frontmatter_links.map((fl) => ({
+    fields: [...fl.fields],
+    pageType: fl.page_type,
+    type: fl.link_type,
+    direction: fl.direction ?? 'outgoing',
+    dirHint: (fl.target_dirs ?? [])
+      .map((d) => d.replace(/\/+$/, ''))
+      .filter((d) => d.length > 0),
+  }));
 }

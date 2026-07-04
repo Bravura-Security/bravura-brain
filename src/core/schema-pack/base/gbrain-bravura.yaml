@@ -20,7 +20,7 @@
 
 api_version: gbrain-schema-pack-v1
 name: gbrain-bravura
-version: 1.1.0
+version: 1.2.0
 gbrain_min_version: 0.39.0
 extends: gbrain-recommended
 description: "Bravura Security unified company brain. Spans support (cases, patterns, KB), internal knowledge (concepts, processes, products, people, teams), and sales (deals, RFPs — stubbed). Two-layer compiled-truth pages authored by the nightly enrich agent from raw inbox signals; reference content (Paligo / Confluence-KB / SF-KB / Responsive) ingested DB-direct."
@@ -199,32 +199,46 @@ link_types:
     inverse: documented_by
 
 # Frontmatter field → link verb. Page-typed: the SOURCE page's type selects
-# which mapping applies.
+# which mapping applies. Direction is outgoing (page → resolved target)
+# unless `direction: incoming` is declared.
+#
+# v1.2: target_dirs scope value resolution to the target entity's directory
+# — frontmatter values are display names ("DocuSign", "Bravura Pass"), and
+# prefix-scoped resolution is what keeps fuzzy title matching from pairing a
+# case with an arbitrary same-ish-titled page anywhere in the brain.
 frontmatter_links:
   - page_type: support_case
     fields: [customer, account]
     link_type: for_customer
+    target_dirs: [customers/]
   - page_type: support_case
     fields: [product, product_area, component]
     link_type: affects_product
+    target_dirs: [products/]
   - page_type: support_case
     fields: [escalated_to, assignee, owner]
     link_type: escalated_to
+    target_dirs: [people/, teams/]
   - page_type: support_pattern
     fields: [product, product_area, component]
     link_type: affects_product
+    target_dirs: [products/]
   - page_type: person
     fields: [team]
     link_type: member_of
+    target_dirs: [teams/]
   - page_type: team
     fields: [members, key_people]
     link_type: has_member
+    target_dirs: [people/]
   - page_type: kb_article
     fields: [product, product_area]
     link_type: documents
+    target_dirs: [products/]
   - page_type: process
     fields: [owner, owned_by]
     link_type: owned_by
+    target_dirs: [people/, teams/]
 
 # Fact extraction is on for support_case / support_pattern / product_area /
 # process via their extractable flag above; no override block needed.

@@ -39,7 +39,7 @@ import {
   extractFrontmatterLinks, isGlobalBasenameEnabled, LINK_EXTRACTOR_VERSION_TS,
   WIKILINK_BASENAME_LINK_TYPE,
   buildBasenameIndex, queryBasenameIndex, stripCodeBlocks,
-  type UnresolvedFrontmatterRef, type LinkCandidate,
+  type UnresolvedFrontmatterRef, type LinkCandidate, type PackFrontmatterSource,
 } from '../core/link-extraction.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
@@ -1282,6 +1282,23 @@ export async function extractTimelineForSlugs(
 // no local checkout (e.g. live MCP servers). Uses the typed link inference and
 // timeline parser from src/core/link-extraction.ts.
 
+/**
+ * Best-effort active-pack load for DB extraction. Pack-declared
+ * frontmatter_links rules extend the hardcoded FRONTMATTER_LINK_MAP (see
+ * extractFrontmatterLinks precedence notes). Load failure → undefined →
+ * base-map-only extraction, mirroring put_page's activePack contract.
+ */
+async function loadPackForExtraction(sourceId?: string): Promise<PackFrontmatterSource | undefined> {
+  try {
+    const { loadActivePack } = await import('../core/schema-pack/load-active.ts');
+    const { loadConfig } = await import('../core/config.ts');
+    const resolved = await loadActivePack({ cfg: loadConfig(), remote: false, sourceId });
+    return resolved.manifest;
+  } catch {
+    return undefined;
+  }
+}
+
 async function extractLinksFromDB(
   engine: BrainEngine,
   dryRun: boolean,
@@ -1313,6 +1330,10 @@ async function extractLinksFromDB(
   // Issue #972: opt-in global-basename wikilink resolution. Read once
   // per extract run; threaded into each extractPageLinks call.
   const globalBasename = await isGlobalBasenameEnabled(engine);
+  // Active schema pack (loaded once per run) so pack-declared
+  // frontmatter_links rules produce edges during the frontmatter pass.
+  // Only relevant when that pass runs (--include-frontmatter).
+  const pack = includeFrontmatter ? await loadPackForExtraction(sourceIdFilter) : undefined;
   // v0.32.8: listAllPageRefs enumerates (slug, source_id) so we can thread
   // sourceId to getPage AND build a cross-source resolution map for link
   // disambiguation. Pre-fix used getAllSlugs() which collapsed
@@ -1393,7 +1414,7 @@ async function extractLinksFromDB(
     // basename lookup; off by default for back-compat.
     const extracted = await extractPageLinks(
       slug, fullContent, page.frontmatter, page.type, resolver,
-      { skipFrontmatter: !includeFrontmatter, globalBasename },
+      { skipFrontmatter: !includeFrontmatter, globalBasename, ...(pack ? { pack } : {}) },
     );
     unresolved.push(...extracted.unresolved);
 
@@ -1619,6 +1640,9 @@ async function extractStaleFromDB(
   const resolver = makeResolver(engine, { mode: 'batch' });
   const nullResolver = { resolve: async () => null as string | null };
   const activeResolver = includeFrontmatter ? resolver : nullResolver;
+  // Active schema pack so pack-declared frontmatter_links rules produce
+  // edges in the frontmatter pass (only useful when a real resolver runs).
+  const pack = includeFrontmatter ? await loadPackForExtraction(sourceIdFilter) : undefined;
   const allRefs = await engine.listAllPageRefs();
   const allSlugs = new Set<string>();
   const slugToSources = new Map<string, string[]>();
@@ -1651,6 +1675,7 @@ async function extractStaleFromDB(
       const fullContent = page.compiled_truth + '\n' + page.timeline;
       const extracted = await extractPageLinks(
         page.slug, fullContent, page.frontmatter, page.type, activeResolver,
+        pack ? { pack } : {},
       );
       for (const c of extracted.candidates) {
         const r = resolveCandidateSources(c, page.slug, page.source_id, allSlugs, slugToSources);

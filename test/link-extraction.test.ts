@@ -1283,3 +1283,175 @@ describe("v0.18.0 migration v22 — links_resolution_type", () => {
   });
 });
 
+
+// ─── Pack-declared frontmatter_links (fix: pack rules never produced edges) ───
+
+describe('extractFrontmatterLinks — pack-declared rules', () => {
+  // Mirrors the gbrain-bravura@1.2 shapes: display-name values resolved
+  // prefix-scoped via target_dirs.
+  const pages = {
+    'customers/docusign': 'customers/docusign',
+    'companies/docusign': 'companies/docusign', // decoy — must NOT be chosen for for_customer
+    'products/bravura-pass': 'products/bravura-pass',
+    'products/identity-manager': 'products/identity-manager',
+    'people/pedro': 'people/pedro',
+    'companies/stripe': 'companies/stripe',
+    'meetings/2026-07-01-sync': 'meetings/2026-07-01-sync',
+  };
+  const resolver = makeFixtureResolver(pages);
+
+  const bravuraish = {
+    frontmatter_links: [
+      { page_type: 'support_case', fields: ['customer', 'account'], link_type: 'for_customer', target_dirs: ['customers/'] },
+      { page_type: 'support_case', fields: ['product', 'product_area', 'component'], link_type: 'affects_product', target_dirs: ['products/'] },
+    ],
+  };
+
+  test('support_case.account → for_customer edge scoped to customers/', async () => {
+    const { candidates } = await extractFrontmatterLinks(
+      'support/cases/2026-06-acme-sso', 'support_case' as never,
+      { account: 'DocuSign' }, resolver, bravuraish,
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      fromSlug: 'support/cases/2026-06-acme-sso',
+      targetSlug: 'customers/docusign',   // NOT companies/docusign — dirHint scoped
+      linkType: 'for_customer',
+      linkSource: 'frontmatter',
+      originSlug: 'support/cases/2026-06-acme-sso',
+      originField: 'account',
+    });
+  });
+
+  test('support_case.product → affects_product edge scoped to products/', async () => {
+    const { candidates } = await extractFrontmatterLinks(
+      'support/cases/2026-06-acme-sso', 'support_case' as never,
+      { product: 'Bravura Pass' }, resolver, bravuraish,
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      fromSlug: 'support/cases/2026-06-acme-sso',
+      targetSlug: 'products/bravura-pass',
+      linkType: 'affects_product',
+      linkSource: 'frontmatter',
+    });
+  });
+
+  test('multi-value pack field emits one edge per entry', async () => {
+    const { candidates } = await extractFrontmatterLinks(
+      'support/cases/2026-06-multi', 'support_case' as never,
+      { product: ['Bravura Pass', 'Identity Manager'] }, resolver, bravuraish,
+    );
+    expect(candidates).toHaveLength(2);
+    const targets = candidates.map(c => c.targetSlug).sort();
+    expect(targets).toEqual(['products/bravura-pass', 'products/identity-manager']);
+    for (const c of candidates) expect(c.linkType).toBe('affects_product');
+  });
+
+  test('connector-metadata keys stay excluded even when a pack maps them', async () => {
+    const evilPack = {
+      frontmatter_links: [
+        {
+          page_type: 'support_case',
+          fields: [...CONNECTOR_METADATA_KEYS],
+          link_type: 'came_from',
+          target_dirs: ['companies/'],
+        },
+      ],
+    };
+    const fm: Record<string, unknown> = {};
+    for (const key of CONNECTOR_METADATA_KEYS) fm[key] = 'companies/stripe';
+    const { candidates, unresolved } = await extractFrontmatterLinks(
+      'support/cases/x', 'support_case' as never, fm, resolver, evilPack,
+    );
+    expect(candidates).toHaveLength(0);
+    expect(unresolved).toHaveLength(0);
+  });
+
+  test('base map wins per field — pack cannot override person.company semantics', async () => {
+    const overridingPack = {
+      frontmatter_links: [
+        // Tries to redeclare a base-covered field with a different verb+scope.
+        { page_type: 'person', fields: ['company'], link_type: 'employed_by', target_dirs: ['customers/'] },
+      ],
+    };
+    const { candidates } = await extractFrontmatterLinks(
+      'people/pedro', 'person' as never, { company: 'Stripe' }, resolver, overridingPack,
+    );
+    // Exactly ONE edge, and it is the base map's works_at — not employed_by,
+    // and not doubled.
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      fromSlug: 'people/pedro',
+      targetSlug: 'companies/stripe',
+      linkType: 'works_at',
+    });
+  });
+
+  test('direction: incoming — resolved value becomes the FROM side', async () => {
+    const personalish = {
+      frontmatter_links: [
+        { page_type: 'meeting', fields: ['participants'], link_type: 'attended', direction: 'incoming' as const, target_dirs: ['people/'] },
+      ],
+    };
+    const { candidates } = await extractFrontmatterLinks(
+      'meetings/2026-07-01-sync', 'meeting' as never,
+      { participants: ['Pedro'] }, resolver, personalish,
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      fromSlug: 'people/pedro',
+      targetSlug: 'meetings/2026-07-01-sync',
+      linkType: 'attended',
+    });
+  });
+
+  test('unresolvable pack-field value lands in unresolved with its field name', async () => {
+    const { candidates, unresolved } = await extractFrontmatterLinks(
+      'support/cases/x', 'support_case' as never,
+      { account: 'Nonexistent Corp' }, resolver, bravuraish,
+    );
+    expect(candidates).toHaveLength(0);
+    expect(unresolved).toEqual([{ field: 'account', name: 'Nonexistent Corp' }]);
+  });
+
+  test('no pack / empty pack → base-map-only behavior unchanged', async () => {
+    for (const pack of [undefined, { frontmatter_links: [] }]) {
+      const { candidates } = await extractFrontmatterLinks(
+        'support/cases/x', 'support_case' as never,
+        { account: 'DocuSign', product: 'Bravura Pass' }, resolver, pack,
+      );
+      // Base map has no support_case rules — pre-fix behavior was zero edges.
+      expect(candidates).toHaveLength(0);
+    }
+  });
+
+  test('extractPageLinks threads opts.pack into the frontmatter pass', async () => {
+    const { candidates } = await extractPageLinks(
+      'support/cases/2026-06-acme-sso',
+      'Customer hit an SSO timeout.',
+      { account: 'DocuSign', product: 'Bravura Pass' },
+      'support_case' as never,
+      resolver,
+      { pack: bravuraish },
+    );
+    const fm = candidates.filter(c => c.linkSource === 'frontmatter');
+    expect(fm.map(c => `${c.linkType}:${c.targetSlug}`).sort()).toEqual([
+      'affects_product:products/bravura-pass',
+      'for_customer:customers/docusign',
+    ]);
+  });
+
+  test('extractPageLinks skipFrontmatter also suppresses pack rules', async () => {
+    const { candidates, unresolved } = await extractPageLinks(
+      'support/cases/2026-06-acme-sso',
+      'body text',
+      { account: 'DocuSign' },
+      'support_case' as never,
+      resolver,
+      { pack: bravuraish, skipFrontmatter: true },
+    );
+    expect(candidates).toHaveLength(0);
+    expect(unresolved).toHaveLength(0);
+  });
+});
