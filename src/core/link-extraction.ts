@@ -13,7 +13,17 @@
 
 import type { BrainEngine } from './engine.ts';
 import type { PageType } from './types.ts';
+import type { SchemaPackManifest } from './schema-pack/manifest-v1.ts';
+import { frontmatterMappingsFromPack } from './schema-pack/link-inference.ts';
 import { ensureWellFormed } from './text-safe.ts';
+
+/**
+ * The slice of an active schema-pack manifest the frontmatter extractor
+ * consumes. Callers thread `resolvedPack.manifest` (or any object with a
+ * `frontmatter_links` array) — the narrow Pick keeps tests cheap and
+ * avoids coupling extraction to the full manifest shape.
+ */
+export type PackFrontmatterSource = Pick<SchemaPackManifest, 'frontmatter_links'>;
 
 /**
  * v0.42.7 — link-extraction version stamp. Bump this ISO timestamp whenever the
@@ -468,7 +478,7 @@ export async function extractPageLinks(
   frontmatter: Record<string, unknown>,
   pageType: PageType,
   resolver: SlugResolver,
-  opts: { globalBasename?: boolean; skipFrontmatter?: boolean } = {},
+  opts: { globalBasename?: boolean; skipFrontmatter?: boolean; pack?: PackFrontmatterSource } = {},
 ): Promise<PageLinksResult> {
   const candidates: LinkCandidate[] = [];
 
@@ -553,7 +563,7 @@ export async function extractPageLinks(
   // path needed `resolveBasenameMatches` on the real resolver.
   let fmUnresolved: UnresolvedFrontmatterRef[] = [];
   if (!opts.skipFrontmatter) {
-    const fm = await extractFrontmatterLinks(slug, pageType, frontmatter, resolver);
+    const fm = await extractFrontmatterLinks(slug, pageType, frontmatter, resolver, opts.pack);
     candidates.push(...fm.candidates);
     fmUnresolved = fm.unresolved;
   }
@@ -1047,24 +1057,66 @@ export interface FrontmatterExtractResult {
  * Arrays of strings: each entry resolved independently.
  * Arrays of objects: uses the `name` or `slug` property (codex tension 6.3).
  * Non-string / non-object entries: silently skipped (log-only).
+ *
+ * PACK RULES: when `pack` (the active schema-pack manifest, or its
+ * `frontmatter_links` slice) is provided, pack-declared rules are applied
+ * IN ADDITION to the hardcoded FRONTMATTER_LINK_MAP. Precedence is
+ * base-map-first PER FIELD: if any base mapping applicable to this page
+ * type covers a field, pack rules for that field are skipped. Rationale:
+ * base entries carry production-tuned direction + multi-dir hints that
+ * the pack rule shape may not express (and the bundled pack YAMLs mirror
+ * the base map for documentation — skipping prevents double emission).
+ * Pack rules therefore ADD coverage — e.g. gbrain-bravura's
+ * support_case.account → for_customer scoped to customers/ — without
+ * being able to degrade a base field's semantics.
+ *
+ * CONNECTOR_METADATA_KEYS are excluded for pack rules exactly like base
+ * rules: a pack mapping `source`/`scope`/`origin`/`origin_source` can
+ * never reintroduce the whole-table junk-edge storm.
  */
 export async function extractFrontmatterLinks(
   slug: string,
   pageType: PageType,
   frontmatter: Record<string, unknown>,
   resolver: SlugResolver,
+  pack?: PackFrontmatterSource,
 ): Promise<FrontmatterExtractResult> {
   const candidates: LinkCandidate[] = [];
   const unresolved: UnresolvedFrontmatterRef[] = [];
 
-  for (const mapping of FRONTMATTER_LINK_MAP) {
+  // Pack-declared rules, converted to the same mapping shape. Tagged so the
+  // per-field loop can apply base-map-first precedence.
+  const packMappings: FrontmatterFieldMapping[] =
+    pack && pack.frontmatter_links.length > 0 ? frontmatterMappingsFromPack(pack) : [];
+
+  // Fields the base map covers for THIS page type (mappings without a
+  // pageType filter — sources/related/see_also — cover every type).
+  // Pack rules skip these fields so base semantics can't be overridden
+  // or double-emitted.
+  const baseCoveredFields = new Set<string>();
+  if (packMappings.length > 0) {
+    for (const m of FRONTMATTER_LINK_MAP) {
+      if (m.pageType && m.pageType !== pageType) continue;
+      for (const f of m.fields) baseCoveredFields.add(f);
+    }
+  }
+
+  const allMappings: Array<{ mapping: FrontmatterFieldMapping; fromPack: boolean }> = [
+    ...FRONTMATTER_LINK_MAP.map((mapping) => ({ mapping, fromPack: false })),
+    ...packMappings.map((mapping) => ({ mapping, fromPack: true })),
+  ];
+
+  for (const { mapping, fromPack } of allMappings) {
     if (mapping.pageType && mapping.pageType !== pageType) continue;
     for (const field of mapping.fields) {
       // Connector-stamped provenance keys (source/scope/origin/...) are ingest
       // bookkeeping, not editorial references — never turn them into edges.
-      // Guard here (not just via the map) so a future pack-authored mapping
-      // for these keys cannot reintroduce the junk-edge storm.
+      // Guard here (not just via the map) so a pack-authored mapping for
+      // these keys cannot reintroduce the junk-edge storm.
       if (CONNECTOR_METADATA_KEYS.has(field)) continue;
+      // Base-map-first: a field the base map handles for this page type is
+      // never re-processed by a pack rule.
+      if (fromPack && baseCoveredFields.has(field)) continue;
       const value = frontmatter[field];
       if (value == null) continue;
       const entries = Array.isArray(value) ? value : [value];

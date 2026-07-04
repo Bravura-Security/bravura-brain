@@ -106,6 +106,7 @@ export {
 export {
   inferLinkTypeFromPack,
   frontmatterLinkTypeFromPack,
+  frontmatterMappingsFromPack,
 } from './link-inference.ts';
 
 export {

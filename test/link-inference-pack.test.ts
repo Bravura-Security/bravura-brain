@@ -12,6 +12,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   inferLinkTypeFromPack,
   frontmatterLinkTypeFromPack,
+  frontmatterMappingsFromPack,
   parseSchemaPackManifest,
   PageRegexBudget,
 } from '../src/core/schema-pack/index.ts';
@@ -130,5 +131,98 @@ describe('frontmatterLinkTypeFromPack (T7b)', () => {
       link_types: [],
     });
     expect(frontmatterLinkTypeFromPack(pack, 'person', 'company')).toBeNull();
+  });
+});
+
+describe('frontmatterMappingsFromPack (pack frontmatter_links → extraction wiring)', () => {
+  test('converts bravura-style rules with target_dirs into field mappings', () => {
+    const pack = parseSchemaPackManifest({
+      api_version: 'gbrain-schema-pack-v1',
+      name: 'test',
+      version: '0.1.0',
+      extends: null,
+      page_types: [],
+      link_types: [],
+      frontmatter_links: [
+        { page_type: 'support_case', fields: ['customer', 'account'], link_type: 'for_customer', target_dirs: ['customers/'] },
+        { page_type: 'support_case', fields: ['product', 'product_area'], link_type: 'affects_product', target_dirs: ['products/'] },
+      ],
+    });
+    const mappings = frontmatterMappingsFromPack(pack);
+    expect(mappings).toHaveLength(2);
+    expect(mappings[0]).toEqual({
+      fields: ['customer', 'account'],
+      pageType: 'support_case',
+      type: 'for_customer',
+      direction: 'outgoing',            // default when undeclared
+      dirHint: ['customers'],           // trailing slash stripped
+    });
+    expect(mappings[1].dirHint).toEqual(['products']);
+  });
+
+  test('direction: incoming is preserved', () => {
+    const pack = parseSchemaPackManifest({
+      api_version: 'gbrain-schema-pack-v1',
+      name: 'test',
+      version: '0.1.0',
+      extends: null,
+      page_types: [],
+      link_types: [],
+      frontmatter_links: [
+        { page_type: 'meeting', fields: ['attendees'], link_type: 'attended', direction: 'incoming', target_dirs: ['people/'] },
+      ],
+    });
+    const [m] = frontmatterMappingsFromPack(pack);
+    expect(m.direction).toBe('incoming');
+    expect(m.dirHint).toEqual(['people']);
+  });
+
+  test('omitted target_dirs → empty dirHint (unscoped, like base related/see_also)', () => {
+    const pack = parseSchemaPackManifest({
+      api_version: 'gbrain-schema-pack-v1',
+      name: 'test',
+      version: '0.1.0',
+      extends: null,
+      page_types: [],
+      link_types: [],
+      frontmatter_links: [
+        { page_type: 'process', fields: ['owner'], link_type: 'owned_by' },
+      ],
+    });
+    const [m] = frontmatterMappingsFromPack(pack);
+    expect(m.dirHint).toEqual([]);
+  });
+
+  test('nested + slash-noisy target_dirs normalize cleanly', () => {
+    const pack = parseSchemaPackManifest({
+      api_version: 'gbrain-schema-pack-v1',
+      name: 'test',
+      version: '0.1.0',
+      extends: null,
+      page_types: [],
+      link_types: [],
+      frontmatter_links: [
+        { page_type: 'kb_article', fields: ['case'], link_type: 'documents', target_dirs: ['support/cases/', '/', 'products'] },
+      ],
+    });
+    const [m] = frontmatterMappingsFromPack(pack);
+    // 'support/cases/' → 'support/cases'; '/' collapses to '' and is dropped;
+    // 'products' passes through.
+    expect(m.dirHint).toEqual(['support/cases', 'products']);
+  });
+
+  test('frontmatterLinkTypeFromPack still matches rules carrying the new fields', () => {
+    const pack = parseSchemaPackManifest({
+      api_version: 'gbrain-schema-pack-v1',
+      name: 'test',
+      version: '0.1.0',
+      extends: null,
+      page_types: [],
+      link_types: [],
+      frontmatter_links: [
+        { page_type: 'support_case', fields: ['account'], link_type: 'for_customer', direction: 'outgoing', target_dirs: ['customers/'] },
+      ],
+    });
+    expect(frontmatterLinkTypeFromPack(pack, 'support_case', 'account')).toBe('for_customer');
   });
 });
