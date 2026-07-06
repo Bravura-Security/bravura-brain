@@ -20,7 +20,7 @@
 
 api_version: gbrain-schema-pack-v1
 name: gbrain-bravura
-version: 1.2.0
+version: 1.3.0
 gbrain_min_version: 0.39.0
 extends: gbrain-recommended
 description: "Bravura Security unified company brain. Spans support (cases, patterns, KB), internal knowledge (concepts, processes, products, people, teams), and sales (deals, RFPs — stubbed). Two-layer compiled-truth pages authored by the nightly enrich agent from raw inbox signals; reference content (Paligo / Confluence-KB / SF-KB / Responsive) ingested DB-direct."
@@ -206,13 +206,20 @@ link_types:
 # — frontmatter values are display names ("DocuSign", "Bravura Pass"), and
 # prefix-scoped resolution is what keeps fuzzy title matching from pairing a
 # case with an arbitrary same-ish-titled page anywhere in the brain.
+#
+# v1.3: the verb-named fields themselves (for_customer, affects_product) are
+# mapped too — the enrich agent writes `for_customer: customers/docusign`
+# (slug-form) rather than `account: DocuSign` on the pages it authors, and
+# unmapped fields were silently ignored (no edge, no unresolved report).
+# Slug-form values resolve exact-only in the resolver (explicit slug beats
+# the target_dirs hint; a miss reports unresolved instead of fuzzy-matching).
 frontmatter_links:
   - page_type: support_case
-    fields: [customer, account]
+    fields: [customer, account, for_customer]
     link_type: for_customer
     target_dirs: [customers/]
   - page_type: support_case
-    fields: [product, product_area, component]
+    fields: [product, product_area, component, affects_product]
     link_type: affects_product
     target_dirs: [products/]
   - page_type: support_case
@@ -220,7 +227,7 @@ frontmatter_links:
     link_type: escalated_to
     target_dirs: [people/, teams/]
   - page_type: support_pattern
-    fields: [product, product_area, component]
+    fields: [product, product_area, component, affects_product]
     link_type: affects_product
     target_dirs: [products/]
   - page_type: person
