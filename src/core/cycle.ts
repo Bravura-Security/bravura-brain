@@ -919,6 +919,9 @@ async function runPhaseSync(
         chunksCreated: result.chunksCreated,
         failedFiles: result.failedFiles ?? 0,
         syncStatus: result.status,
+        // 2026-07 data-loss incident: surface a tripped mass-delete circuit
+        // breaker in the cycle report so autopilot logs make it greppable.
+        ...(result.reconcileSuppressed ? { reconcileSuppressed: result.reconcileSuppressed } : {}),
         dryRun,
       },
       pagesAffected: result.pagesAffected,

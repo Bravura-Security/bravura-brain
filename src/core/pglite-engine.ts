@@ -988,6 +988,9 @@ export class PGLiteEngine implements BrainEngine {
          frontmatter = EXCLUDED.frontmatter,
          content_hash = EXCLUDED.content_hash,
          updated_at = now(),
+         -- 2026-07 "ghost-write" fix (job 4620): putPage onto a soft-deleted
+         -- row is a restore-on-write — clear deleted_at. Mirrors postgres-engine.ts.
+         deleted_at = NULL,
          effective_date        = COALESCE(EXCLUDED.effective_date,        pages.effective_date),
          effective_date_source = COALESCE(EXCLUDED.effective_date_source, pages.effective_date_source),
          import_filename       = COALESCE(EXCLUDED.import_filename,       pages.import_filename),

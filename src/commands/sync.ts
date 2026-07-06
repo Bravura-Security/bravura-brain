@@ -221,6 +221,13 @@ export interface SyncResult {
    * everything," the exact misdiagnosis in the #1794 recurrence report.
    */
   bankedFiles?: number;
+  /**
+   * 2026-07 data-loss incident — count of stale pages the full-sync reconcile
+   * REFUSED to delete because the sweep exceeded the mass-delete circuit
+   * breaker (max(20, 2% of the source's active pages)). When set, verify the
+   * deletions are intentional and re-run with --force-reconcile.
+   */
+  reconcileSuppressed?: number;
 }
 
 /**
@@ -821,6 +828,21 @@ export interface SyncOpts {
    * Precedent: CycleOpts.signal at src/core/cycle.ts (v0.22.1 #403).
    */
   signal?: AbortSignal;
+  /**
+   * 2026-07 data-loss incident (sync jobs 4722 + 5649) — reconcile hard-delete
+   * escape hatch. The full-sync stale-page reconcile now SOFT-deletes
+   * (deleted_at = now(); recoverable via `restore_page` until the purge
+   * window expires). Passing --hard-reconcile restores the old destructive
+   * `engine.deletePages` path (page_versions cascade — history destroyed).
+   * NEVER set by autopilot/cycle/jobs/deployments — explicit CLI only.
+   */
+  hardReconcile?: boolean;
+  /**
+   * 2026-07 data-loss incident — mass-delete circuit breaker override. The
+   * full-sync reconcile refuses to reap more than max(20, 2% of the source's
+   * active pages) in one sweep unless this is set (CLI --force-reconcile).
+   */
+  forceReconcile?: boolean;
 }
 
 /**
@@ -999,6 +1021,90 @@ async function writeSyncAnchor(
   // resolves a sourceId (incl. 'default'), so newest_content_at is written via
   // the sourceId branch above; the default source is not stuck on NULL.
   await engine.setConfig(`sync.${which}`, value);
+}
+
+/**
+ * 2026-07 data-loss incident (sync jobs 4722 + 5649) — anchor-after-push guard.
+ *
+ * Root cause chain: put_page write-through commits landed only in the local
+ * checkout; the sidecar push failed silently; a pod restart fresh-cloned
+ * origin (losing the unpushed commits); the DB anchor then pointed at a
+ * commit that no longer existed anywhere → "Sync anchor object missing →
+ * full reimport" → the reconcile pass reaped every page whose file was only
+ * in the lost commits.
+ *
+ * Invariant enforced here: `last_commit` is only ever advanced to a commit
+ * that is REACHABLE FROM A REMOTE-TRACKING REF (i.e. survives a fresh clone).
+ * Resolution order:
+ *   1. Repo has no remote → anchor as before (local-only brains, tests).
+ *   2. Commit is contained in some remote-tracking branch → anchor it.
+ *   3. Commit is local-only (unpushed) → DEMOTE to the newest origin-reachable
+ *      ancestor (merge-base with @{upstream} / origin HEAD/main/master). The
+ *      unpushed delta re-diffs on the next sync — idempotent re-import, no
+ *      loss, and the anchor self-heals to HEAD once the push lands.
+ *   4. No origin-reachable ancestor resolvable → keep the PREVIOUS anchor
+ *      (skip the write) and say so.
+ * Probe failures (odd git states) fail OPEN to the legacy behavior so the
+ * guard can never wedge an anchor advance for repos it doesn't understand.
+ */
+function resolveOriginSafeAnchor(
+  repoPath: string,
+  commit: string,
+): { commit: string | null; demotedFrom?: string } {
+  let hasRemote = false;
+  try {
+    hasRemote = git(repoPath, ['remote']).split('\n').some(r => r.trim().length > 0);
+  } catch { /* probe failed → fail open below */ }
+  if (!hasRemote) return { commit };
+  try {
+    const containing = git(repoPath, ['branch', '-r', '--contains', commit, '--format=%(refname:short)']);
+    if (containing.trim().length > 0) return { commit };
+  } catch {
+    // Reachability probe failed — fail open (legacy behavior).
+    return { commit };
+  }
+  // Commit is not on any remote-tracking ref → find the newest remote-reachable
+  // ancestor. @{upstream} first (the branch's own remote counterpart), then the
+  // conventional origin heads.
+  for (const ref of ['@{upstream}', 'origin/HEAD', 'origin/main', 'origin/master']) {
+    try {
+      const mb = git(repoPath, ['merge-base', commit, ref]).trim();
+      if (mb) return { commit: mb, demotedFrom: commit };
+    } catch { /* try next candidate */ }
+  }
+  return { commit: null, demotedFrom: commit };
+}
+
+/**
+ * `last_commit` write wrapper enforcing the anchor-after-push invariant above.
+ * All three sync anchor-advance sites (up-to-date advance, incremental
+ * advance, full-sync advance) route through here.
+ */
+async function writeLastCommitAnchorOriginSafe(
+  engine: BrainEngine,
+  sourceId: string | undefined,
+  repoPath: string,
+  commit: string,
+  newestContentEpochMs?: number | null,
+): Promise<void> {
+  const safe = resolveOriginSafeAnchor(repoPath, commit);
+  if (safe.commit === commit) {
+    await writeSyncAnchor(engine, sourceId, 'last_commit', commit, newestContentEpochMs);
+    return;
+  }
+  if (safe.commit) {
+    serr(
+      `[sync] anchor guard: ${commit.slice(0, 8)} is not reachable from any remote ref ` +
+      `(unpushed commits?) — anchoring at origin-reachable ancestor ${safe.commit.slice(0, 8)} ` +
+      `instead. The unpushed delta re-diffs next sync (idempotent); anchor self-heals after push.`,
+    );
+    await writeSyncAnchor(engine, sourceId, 'last_commit', safe.commit, commitTimeMs(repoPath, safe.commit));
+    return;
+  }
+  serr(
+    `[sync] anchor guard: ${commit.slice(0, 8)} is not reachable from any remote ref and no ` +
+    `origin-reachable ancestor could be resolved — keeping the previous anchor (re-syncs next cycle).`,
+  );
 }
 
 /**
@@ -1695,11 +1801,15 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       objectPresent = false;
     }
     if (!objectPresent) {
-      // Object gc'd after a history rewrite — nothing to diff against, so fall
-      // back to the authoritative full reconcile (which now also purges stale
-      // pages for deleted files; see performFullSync's delete-reconcile pass).
+      // Object gc'd after a history rewrite OR a fresh clone that lost
+      // unpushed local commits (2026-07 incident) — nothing to diff against,
+      // so fall back to the authoritative full reimport. anchorMissing:true
+      // makes performFullSync SKIP its delete-reconcile pass: a working tree
+      // that is behind the DB is EXPECTED on this path (the DB may hold pages
+      // whose backing commits never made it to origin) and is not evidence
+      // that anything was deleted.
       serr(`Sync anchor ${lastCommit.slice(0, 8)} object missing (gc'd after history rewrite). Running full reimport.`);
-      return performFullSync(engine, repoPath, headCommit, opts);
+      return performFullSync(engine, repoPath, headCommit, opts, { anchorMissing: true });
     }
 
     // Observability only — NOT control flow. A non-ancestor bookmark is still
@@ -1926,7 +2036,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     // (#1794): advance to the PINNED target, and clear any checkpoint (a resume
     // whose remaining range turned out to have no syncable changes still
     // completes cleanly here).
-    await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(repoPath, pin));
+    await writeLastCommitAnchorOriginSafe(engine, opts.sourceId, repoPath, pin, commitTimeMs(repoPath, pin));
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
     await clearOpCheckpoint(engine, ckpt.paths);
@@ -2723,7 +2833,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     // "fresh". The checkpoint rows clear here — CONVERGENCE CONTRACT: sync
     // convergence == IMPORT convergence; downstream extract/facts/embed is
     // decoupled (its own resumable stale sweeps).
-    await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(repoPath, pin));
+    await writeLastCommitAnchorOriginSafe(engine, opts.sourceId, repoPath, pin, commitTimeMs(repoPath, pin));
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', repoPath);
     await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
@@ -2954,6 +3064,10 @@ async function performFullSync(
   repoPath: string,
   headCommit: string,
   opts: SyncOpts,
+  // 2026-07 data-loss incident: WHY this full sync fired matters. When the
+  // trigger is a missing anchor object (fresh clone / gc), the working tree
+  // being behind the DB is expected and the stale-page reconcile is skipped.
+  fullSyncCtx?: { anchorMissing?: boolean },
 ): Promise<SyncResult> {
   // Dry-run: walk the repo, count syncable files, return without writing.
   // Fixes the silent-write-on-dry-run bug where performFullSync called
@@ -3029,8 +3143,9 @@ async function performFullSync(
     .map(e => e.path);
   const advanceFull = async (): Promise<void> => {
     // Persist sync state so the next sync is incremental. Routed through
-    // writeSyncAnchor so --source pins the right sources row.
-    await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit, newestCommitMs(repoPath));
+    // writeSyncAnchor so --source pins the right sources row (via the
+    // origin-safe wrapper — 2026-07 anchor-after-push guard).
+    await writeLastCommitAnchorOriginSafe(engine, opts.sourceId, repoPath, headCommit, newestCommitMs(repoPath));
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', repoPath);
     await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
@@ -3102,7 +3217,20 @@ async function performFullSync(
   // Skipped on the legacy no-sourceId path (the batch delete primitives require
   // a sourceId; matches every other source-scoped feature).
   let reconciledDeletes = 0;
-  if (opts.sourceId) {
+  let reconcileSuppressed = 0;
+  if (opts.sourceId && fullSyncCtx?.anchorMissing) {
+    // 2026-07 data-loss incident (sync jobs 4722 + 5649): this full sync was
+    // triggered by a MISSING anchor object — typically a fresh clone after a
+    // pod restart whose sidecar push had silently failed. The working tree
+    // being behind the DB is EXPECTED here (pages materialized by put_page
+    // write-through lived only in the lost local commits), so file absence is
+    // NOT evidence of deletion. Skip the reconcile entirely; the next
+    // anchored incremental sync handles real deletes.
+    slog(
+      `  Skipping stale-page reconcile: this full sync was triggered by a missing sync ` +
+      `anchor (fresh clone / gc). File absence is not evidence of deletion on this path.`,
+    );
+  } else if (opts.sourceId) {
     const sid = opts.sourceId;
     const reconcileSyncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
     // collectSyncableFiles returns ABSOLUTE paths; source_path is stored
@@ -3122,7 +3250,25 @@ async function performFullSync(
         && isSyncable(r.source_path, reconcileSyncOpts)
         && !current.has(r.source_path))
       .map(r => r.slug);
-    if (staleSlugs.length > 0) {
+    // 2026-07 mass-delete circuit breaker: a reconcile that wants to reap more
+    // than max(20, 2% of the source's active pages) in one sweep is far more
+    // likely to be an environmental failure (wrong checkout, lost commits,
+    // wrong strategy) than a genuine mass deletion. Refuse, report, and
+    // require an explicit --force-reconcile to proceed.
+    const activePages = rows.length + (await engine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM pages WHERE source_id = $1 AND source_path IS NULL AND deleted_at IS NULL`,
+      [sid],
+    ))[0].n;
+    const massDeleteThreshold = Math.max(20, Math.ceil(activePages * 0.02));
+    if (staleSlugs.length > massDeleteThreshold && opts.forceReconcile !== true) {
+      reconcileSuppressed = staleSlugs.length;
+      serr(
+        `  RECONCILE CIRCUIT BREAKER: refusing to reap ${staleSlugs.length} stale page(s) — ` +
+        `exceeds max(20, 2% of ${activePages} active pages) = ${massDeleteThreshold} in one sweep. ` +
+        `If these deletions are genuinely intentional, re-run with --force-reconcile.`,
+      );
+    } else if (staleSlugs.length > 0 && opts.hardReconcile === true) {
+      // Explicit --hard-reconcile: the pre-incident destructive path.
       const deleteScopedOpts = { sourceId: sid };
       for (let i = 0; i < staleSlugs.length; i += DELETE_BATCH_SIZE) {
         const batch = staleSlugs.slice(i, i + DELETE_BATCH_SIZE);
@@ -3139,7 +3285,24 @@ async function performFullSync(
         }
       }
       if (reconciledDeletes > 0) {
-        slog(`  Reconciled ${reconciledDeletes} stale page(s) whose source file was removed.`);
+        slog(`  Reconciled ${reconciledDeletes} stale page(s) (HARD delete — --hard-reconcile).`);
+      }
+    } else if (staleSlugs.length > 0) {
+      // Default (2026-07 incident fix): SOFT delete via the canonical
+      // softDeletePage op — the same path the delete_page tool uses. Reaped
+      // pages keep their row, chunks, and page_versions, and are restorable
+      // via restore_page until the purge window expires.
+      for (const slug of staleSlugs) {
+        try {
+          const r = await engine.softDeletePage(slug, { sourceId: sid });
+          if (r) reconciledDeletes++;
+        } catch { /* best-effort, mirrors the old per-slug fallback */ }
+      }
+      if (reconciledDeletes > 0) {
+        slog(
+          `  Reconciled ${reconciledDeletes} stale page(s) whose source file was removed ` +
+          `(soft-deleted; restorable via restore_page).`,
+        );
       }
     }
   }
@@ -3176,6 +3339,7 @@ async function performFullSync(
     chunksCreated: result.chunksCreated,
     embedded,
     pagesAffected: [],
+    ...(reconcileSuppressed > 0 ? { reconcileSuppressed } : {}),
   };
 }
 
@@ -3314,6 +3478,14 @@ Options:
   --skip-failed        Acknowledge previously-recorded sync failures so
                        the bookmark can advance past unparseable files.
   --retry-failed       Re-attempt previously-failed files; clear on success.
+  --force-reconcile    Override the full-sync mass-delete circuit breaker
+                       (the stale-page reconcile refuses to reap more than
+                       max(20, 2% of the source's pages) in one sweep
+                       without this). Single --source scope only.
+  --hard-reconcile     Make the full-sync stale-page reconcile HARD-delete
+                       (destroys page history). Default is soft-delete with
+                       a recovery window ('gbrain restore <slug>').
+                       Single --source scope only.
   --watch              Re-sync continuously on an interval.
   --interval N         Watch-mode interval in seconds (default 60).
   --no-pull            Skip 'git pull' before the sync (useful for tests).
@@ -3360,6 +3532,11 @@ See also:
   const skipFailed = args.includes('--skip-failed');
   const retryFailed = args.includes('--retry-failed');
   const noSchemaPack = args.includes('--no-schema-pack'); // v0.41.37.0 #1569
+  // 2026-07 data-loss incident flags. Single-source only (refused with --all
+  // below): mass reaping / hard deleting is a deliberate per-source operator
+  // action, never a fan-out default.
+  const hardReconcile = args.includes('--hard-reconcile');
+  const forceReconcile = args.includes('--force-reconcile');
   const syncAll = args.includes('--all');
   const jsonOut = args.includes('--json');
   const yesFlag = args.includes('--yes');
@@ -3509,6 +3686,14 @@ See also:
   const explicitSourceArg = args.find((a, i) => args[i - 1] === '--source');
   if (timeoutSeconds !== undefined && !syncAll && !explicitSourceArg) {
     console.error(`--timeout requires either --source <id> or --all to scope the per-source budget.`);
+    process.exit(1);
+  }
+
+  // 2026-07 data-loss incident: the destructive reconcile escape hatches are
+  // deliberate single-source operator actions — refuse them under --all so a
+  // fan-out can never mass-reap every source in one command.
+  if ((hardReconcile || forceReconcile) && syncAll) {
+    console.error(`--hard-reconcile / --force-reconcile require a single --source scope (not --all).`);
     process.exit(1);
   }
 
@@ -3878,6 +4063,8 @@ See also:
             deleted: r.result.deleted,
             chunks_created: r.result.chunksCreated,
             embedded: r.result.embedded,
+            // 2026-07: surface a tripped mass-delete circuit breaker in the envelope.
+            ...(r.result.reconcileSuppressed ? { reconcile_suppressed: r.result.reconcileSuppressed } : {}),
           } : {}),
           ...(r.error ? { error: r.error } : {}),
         }));
@@ -3915,6 +4102,7 @@ See also:
   const onSingleSourceSigint = () => { try { singleSourceInterrupt.abort(new Error('SIGINT')); } catch { /* */ } };
   const opts: SyncOpts = {
     repoPath, dryRun, full, noPull, noEmbed, noExtract, skipFailed, retryFailed, noSchemaPack, sourceId,
+    hardReconcile, forceReconcile,
     strategy: strategyArg, concurrency,
     signal: composeAbortSignals(singleSourceInterrupt.signal, singleSourceController?.signal),
   };
@@ -4676,6 +4864,12 @@ function printSyncResult(result: SyncResult, sink: NodeJS.WriteStream = process.
     case 'first_sync':
       write(`First sync complete. Checkpoint: ${result.toCommit.slice(0, 8)}`);
       write(`  ${result.added} file(s) imported, ${result.chunksCreated} chunks${result.embedded > 0 ? `, ${result.embedded} pages embedded` : ''}`);
+      if (result.reconcileSuppressed) {
+        write(
+          `  WARNING: mass-delete circuit breaker suppressed ${result.reconcileSuppressed} ` +
+          `stale-page deletion(s). Verify they are intentional, then re-run with --force-reconcile.`,
+        );
+      }
       break;
     case 'dry_run':
       break; // already printed in performSync
