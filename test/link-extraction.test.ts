@@ -10,6 +10,7 @@ import {
   isAutoLinkEnabled,
   FRONTMATTER_LINK_MAP,
   CONNECTOR_METADATA_KEYS,
+  SLUG_PATH_VALUE_RE,
   type SlugResolver,
 } from '../src/core/link-extraction.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -798,9 +799,11 @@ function makeFixtureResolver(pages: Record<string, string>): SlugResolver {
   return {
     async resolve(name: string, dirHint?: string | string[]) {
       const hints = Array.isArray(dirHint) ? dirHint : (dirHint ? [dirHint] : []);
-      // Already a slug — check if present.
-      if (/^[a-z][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(name)) {
-        return pages[name] ?? null;
+      // Slug-path values: exact (case-insensitive) or null — mirrors
+      // makeResolver's SLUG_PATH_VALUE_RE step (explicit slug beats hint,
+      // no fuzzy fallback).
+      if (SLUG_PATH_VALUE_RE.test(name)) {
+        return pages[name.toLowerCase()] ?? null;
       }
       const slugified = name.toLowerCase().replace(/\s+/g, '-');
       for (const hint of hints) {
@@ -999,6 +1002,61 @@ describe('makeResolver — fallback chain', () => {
     const engine = makeFakeEngine(['people/pedro']);
     const r = makeResolver(engine);
     expect(await r.resolve('people/pedro')).toBe('people/pedro');
+  });
+
+  // ─── slug-path values: exact-first, case-insensitive, no fuzzy fallback ───
+
+  test('step 1: slug-path value resolves case-insensitively to the exact page', async () => {
+    const engine = makeFakeEngine(['customers/docusign']);
+    const r = makeResolver(engine);
+    expect(await r.resolve('customers/DocuSign')).toBe('customers/docusign');
+  });
+
+  test('step 1: multi-segment slug-path value resolves exactly', async () => {
+    const engine = makeFakeEngine(['support/patterns/idtrack-threshold-violations']);
+    const r = makeResolver(engine);
+    expect(await r.resolve('support/patterns/idtrack-threshold-violations'))
+      .toBe('support/patterns/idtrack-threshold-violations');
+  });
+
+  test('step 1: slug-path with MISMATCHED dirHint still resolves — explicit slug beats hint', async () => {
+    const engine = makeFakeEngine(['products/bravura-pass']);
+    const r = makeResolver(engine);
+    // Rule hints customers/ but the author wrote an explicit products/ slug.
+    expect(await r.resolve('products/bravura-pass', 'customers')).toBe('products/bravura-pass');
+  });
+
+  test('step 1: nonexistent slug-path returns null with NO fuzzy fallback', async () => {
+    // fuzzyMap WOULD match the value — the resolver must never consult it
+    // for slug-path values (an explicit path that misses is unresolved,
+    // not an invitation to pair with a similar-titled random page).
+    const engine = makeFakeEngine(
+      [],
+      new Map([['customers/ghost', { slug: 'customers/gholst-industries', similarity: 0.9 }]]),
+    );
+    const r = makeResolver(engine);
+    expect(await r.resolve('customers/ghost', 'customers')).toBeNull();
+    const counts = (engine as any)._counts();
+    expect(counts.fuzzyCalls).toBe(0);
+    expect(counts.searchCalls).toBe(0);
+  });
+
+  test('display-name values (spaces, no slash) still take the hint + fuzzy path', async () => {
+    const engine = makeFakeEngine(
+      [],
+      new Map([['Ernst and Young Global', { slug: 'customers/ernst-and-young', similarity: 0.7 }]]),
+    );
+    const r = makeResolver(engine);
+    expect(await r.resolve('Ernst and Young Global', 'customers')).toBe('customers/ernst-and-young');
+  });
+
+  test('SLUG_PATH_VALUE_RE: shape coverage', () => {
+    for (const yes of ['customers/docusign', 'customers/DocuSign', 'support/patterns/x-1', 'inbox/salesforce-case/case-00001258']) {
+      expect(SLUG_PATH_VALUE_RE.test(yes)).toBe(true);
+    }
+    for (const no of ['DocuSign', 'Ernst and Young Global', 'TD Bank / Canada Trust', '/leading', 'trailing/', 'a//b', 'has space/x']) {
+      expect(SLUG_PATH_VALUE_RE.test(no)).toBe(false);
+    }
   });
 
   test('step 2: dir-hint construction', async () => {
@@ -1301,9 +1359,11 @@ describe('extractFrontmatterLinks — pack-declared rules', () => {
   const resolver = makeFixtureResolver(pages);
 
   const bravuraish = {
+    // Mirrors gbrain-bravura@1.3: the verb-named fields (for_customer,
+    // affects_product) are mapped alongside the display-name fields.
     frontmatter_links: [
-      { page_type: 'support_case', fields: ['customer', 'account'], link_type: 'for_customer', target_dirs: ['customers/'] },
-      { page_type: 'support_case', fields: ['product', 'product_area', 'component'], link_type: 'affects_product', target_dirs: ['products/'] },
+      { page_type: 'support_case', fields: ['customer', 'account', 'for_customer'], link_type: 'for_customer', target_dirs: ['customers/'] },
+      { page_type: 'support_case', fields: ['product', 'product_area', 'component', 'affects_product'], link_type: 'affects_product', target_dirs: ['products/'] },
     ],
   };
 
@@ -1335,6 +1395,45 @@ describe('extractFrontmatterLinks — pack-declared rules', () => {
       linkType: 'affects_product',
       linkSource: 'frontmatter',
     });
+  });
+
+  test('SLUG-FORM support_case.for_customer → exact for_customer edge', async () => {
+    // Agent-authored pages write `for_customer: customers/docusign`
+    // (slug-form), not `account: DocuSign` — the value must resolve as an
+    // exact slug, not a display name.
+    const { candidates } = await extractFrontmatterLinks(
+      'support/cases/case-00001258', 'support_case' as never,
+      { for_customer: 'customers/docusign' }, resolver, bravuraish,
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      fromSlug: 'support/cases/case-00001258',
+      targetSlug: 'customers/docusign',
+      linkType: 'for_customer',
+      linkSource: 'frontmatter',
+      originField: 'for_customer',
+    });
+  });
+
+  test('slug-form value with MISMATCHED dirHint still resolves — explicit slug beats target_dirs', async () => {
+    // Rule scopes to customers/ but the author wrote an explicit
+    // products/ slug: honor the explicit reference.
+    const { candidates } = await extractFrontmatterLinks(
+      'support/cases/case-x', 'support_case' as never,
+      { for_customer: 'products/bravura-pass' }, resolver, bravuraish,
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].targetSlug).toBe('products/bravura-pass');
+    expect(candidates[0].linkType).toBe('for_customer');
+  });
+
+  test('NONEXISTENT slug-form value → unresolved, no edge (no fuzzy fallback to random pages)', async () => {
+    const { candidates, unresolved } = await extractFrontmatterLinks(
+      'support/cases/case-x', 'support_case' as never,
+      { for_customer: 'customers/no-such-customer' }, resolver, bravuraish,
+    );
+    expect(candidates).toHaveLength(0);
+    expect(unresolved).toEqual([{ field: 'for_customer', name: 'customers/no-such-customer' }]);
   });
 
   test('multi-value pack field emits one edge per entry', async () => {

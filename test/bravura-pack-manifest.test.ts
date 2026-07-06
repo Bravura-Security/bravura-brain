@@ -93,6 +93,23 @@ describe('gbrain-bravura company-brain pack', () => {
     expect(inv.get('escalated_to')).toBe('handled_by');
   });
 
+  test('v1.3: verb-named frontmatter fields (for_customer, affects_product) are mapped', () => {
+    // The enrich agent writes `for_customer: customers/docusign` /
+    // `affects_product: products/bravura-identity` (slug-form) on the pages
+    // it authors. Unmapped fields are silently ignored by
+    // extractFrontmatterLinks — no edge, not even an unresolved report —
+    // so the verb-named fields must be declared alongside the
+    // display-name fields (account, product, ...).
+    const byField = (pageType: string, field: string) =>
+      (pack.frontmatter_links ?? []).find(
+        (fl) => (fl.page_type === undefined || fl.page_type === pageType) && fl.fields.includes(field),
+      );
+    expect(byField('support_case', 'for_customer')?.link_type).toBe('for_customer');
+    expect(byField('support_case', 'account')?.link_type).toBe('for_customer');
+    expect(byField('support_case', 'affects_product')?.link_type).toBe('affects_product');
+    expect(byField('support_pattern', 'affects_product')?.link_type).toBe('affects_product');
+  });
+
   test('filing rules cover every authored type', () => {
     const kinds = pack.filing_rules.map((r) => r.kind).sort();
     expect(kinds).toEqual([

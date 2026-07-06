@@ -833,6 +833,17 @@ export const CONNECTOR_METADATA_KEYS = new Set<string>([
 
 // ─── Slug resolver ──────────────────────────────────────────────
 
+/**
+ * Frontmatter values that LOOK like explicit slug paths: at least one `/`,
+ * every segment in the slug charset (letters/digits/`.`/`_`/`-`). Matched
+ * case-insensitively — agent-authored pages sometimes write
+ * `customers/DocuSign` where the stored slug is `customers/docusign`.
+ *
+ * Values like "Ernst and Young Global" (spaces) or "TD Bank / Canada"
+ * (space-padded slash) do NOT match and stay on the display-name path.
+ */
+export const SLUG_PATH_VALUE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)+$/;
+
 export interface SlugResolver {
   /**
    * Resolve a display name to a canonical slug.
@@ -977,13 +988,25 @@ export function makeResolver(
 
       const hints = Array.isArray(dirHint) ? dirHint : (dirHint ? [dirHint] : []);
 
-      // Step 1: already a slug? (dir/name shape, lowercase, hyphenated)
-      if (/^[a-z][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/.test(trimmed)) {
-        const page = await engine.getPage(trimmed);
-        if (page) {
-          cache.set(cacheKey, trimmed);
-          return trimmed;
-        }
+      // Step 1: explicit slug-path value (contains '/', slug charset —
+      // any depth, any case). Resolve as an EXACT slug or not at all:
+      //   - Case-insensitive: `customers/DocuSign` → getPage('customers/docusign').
+      //   - dirHint is NOT consulted — an explicit slug beats the mapping's
+      //     directory hint (`for_customer: products/x` resolves to products/x
+      //     even when the rule hints customers/).
+      //   - A miss returns null (unresolved) with NO fuzzy fallback. An
+      //     explicit path that misses means the target page doesn't exist;
+      //     pg_trgm title-matching a path string would only ever pair it
+      //     with an arbitrary similar-titled page (junk edge). The old
+      //     behavior (fall through to dirHint-join + fuzzy) also mangled
+      //     paths: norm() strips '/', so `customers/pseg` became the
+      //     nonsense candidate `customers/customerspseg`.
+      if (SLUG_PATH_VALUE_RE.test(trimmed)) {
+        const exact = trimmed.toLowerCase();
+        const page = await engine.getPage(exact);
+        const result = page ? exact : null;
+        cache.set(cacheKey, result);
+        return result;
       }
 
       // Step 2: dir-hint + slugify → exact getPage
