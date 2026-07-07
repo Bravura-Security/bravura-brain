@@ -188,6 +188,31 @@ describe('runRetypeCore', () => {
       );
       expect(rows[0].type).toBe('tweet-single');
     });
+
+    it('path_filter falls back to slug for DB-put pages (NULL source_path)', async () => {
+      // Connector-ingested pages (put_page) carry no source_path; the filter
+      // matches COALESCE(source_path, slug) so a prefix rule still selects them.
+      await seed('confluence/confluence-1', 'concept');
+      await seed('concepts/real-concept', 'concept');
+      await engine.executeRaw(`UPDATE pages SET source_path = NULL`);
+      const dry = await runRetypeCore(ctxOf(), {
+        rules: [{ from_type: 'concept', to_type: 'documentation', subtype_field: 'origin', subtype: 'confluence', path_filter: 'confluence/%' }],
+        apply: false,
+      });
+      expect(dry.per_rule[0].would_apply).toBe(1);
+      expect(dry.per_rule[0].sample_slugs).toEqual(['confluence/confluence-1']);
+      const result = await runRetypeCore(ctxOf(), {
+        rules: [{ from_type: 'concept', to_type: 'documentation', subtype_field: 'origin', subtype: 'confluence', path_filter: 'confluence/%' }],
+        apply: true,
+      });
+      expect(result.total_applied).toBe(1);
+      const rows = await engine.executeRaw<{ slug: string; type: string; origin: string | null }>(
+        `SELECT slug, type, frontmatter->>'origin' AS origin FROM pages ORDER BY slug`,
+      );
+      expect(rows.find((r) => r.slug === 'confluence/confluence-1')?.type).toBe('documentation');
+      expect(rows.find((r) => r.slug === 'confluence/confluence-1')?.origin).toBe('confluence');
+      expect(rows.find((r) => r.slug === 'concepts/real-concept')?.type).toBe('concept');
+    });
   });
 
   describe('subtype_field allowlist (D9)', () => {
