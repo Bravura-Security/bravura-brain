@@ -3,8 +3,9 @@
 # Forked from gbrain-recommended (which it extends) to add the page types,
 # link verbs, and filing rules for a company brain spanning SUPPORT, SALES,
 # and INTERNAL knowledge. The taxonomy is designed to hold all three; the
-# first build slice populates INTERNAL + SUPPORT, with `deal`/`rfp` stubbed
-# for the later sales slice.
+# first build slice populated INTERNAL + SUPPORT. v1.4 opens the sales slice:
+# `deal` pages (Salesforce opportunities, ingested DB-direct by brain-ingest
+# under sales/opportunities/) are live; `rfp` remains stubbed.
 #
 # Activate:  gbrain schema use gbrain-bravura
 #
@@ -20,10 +21,10 @@
 
 api_version: gbrain-schema-pack-v1
 name: gbrain-bravura
-version: 1.3.0
+version: 1.4.0
 gbrain_min_version: 0.39.0
 extends: gbrain-recommended
-description: "Bravura Security unified company brain. Spans support (cases, patterns, KB), internal knowledge (concepts, processes, products, people, teams), and sales (deals, RFPs — stubbed). Two-layer compiled-truth pages authored by the nightly enrich agent from raw inbox signals; reference content (Paligo / Confluence-KB / SF-KB / Responsive) ingested DB-direct."
+description: "Bravura Security unified company brain. Spans support (cases, patterns, KB), internal knowledge (concepts, processes, products, people, teams), and sales (deals live via Salesforce opportunities; RFPs stubbed). Two-layer compiled-truth pages authored by the nightly enrich agent from raw inbox signals; reference content (Paligo / Confluence-KB / SF-KB / Responsive / opportunities) ingested DB-direct."
 
 # Borrow the base entity types this pack's filing rules + links reference.
 # borrow_from signals intent; the registry already merges types via extends.
@@ -123,8 +124,25 @@ page_types:
     extractable: false
     expert_routing: false
 
-  # ---- Sales (STUB — populated in the later sales slice) ----
+  # ---- Sales ----
+  - name: deal
+    # v1.4 — Salesforce opportunity pages, ingested DB-direct by brain-ingest
+    # (origin salesforce-opportunity) at sales/opportunities/<id>. Redeclared
+    # here (it also exists in gbrain-recommended with the deals/ prefix)
+    # because extends-chain resolution does not merge parent page_types'
+    # path_prefixes — this declaration is what types sales/opportunities/
+    # pages. Living reference (daily idempotent re-put), retrieval-only like
+    # KB: high-churn structured records; fact extraction deferred.
+    primitive: temporal
+    path_prefixes:
+      - sales/opportunities/
+      - deals/
+    aliases: []
+    extractable: false
+    expert_routing: false
+
   - name: rfp
+    # STUB — populated when the RFP slice is built.
     primitive: media
     path_prefixes:
       - sales/rfp/
@@ -215,6 +233,13 @@ link_types:
 # the target_dirs hint; a miss reports unresolved instead of fuzzy-matching).
 frontmatter_links:
   - page_type: support_case
+    fields: [customer, account, for_customer]
+    link_type: for_customer
+    target_dirs: [customers/]
+  # v1.4: deal pages carry a LITERAL `account` (Salesforce Account.Name,
+  # stamped by brain-ingest — never inferred), wiring deals into the graph
+  # the same way cases do: deal --for_customer--> customer.
+  - page_type: deal
     fields: [customer, account, for_customer]
     link_type: for_customer
     target_dirs: [customers/]

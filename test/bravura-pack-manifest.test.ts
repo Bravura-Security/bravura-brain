@@ -34,6 +34,7 @@ describe('gbrain-bravura company-brain pack', () => {
     const names = pack.page_types.map((t) => t.name).sort();
     expect(names).toEqual([
       'customer',
+      'deal',
       'documentation',
       'inbox',
       'kb_article',
@@ -61,6 +62,7 @@ describe('gbrain-bravura company-brain pack', () => {
     expect(isExtractable('responsive_qa')).toBe(false);
     expect(isExtractable('documentation')).toBe(false);
     expect(isExtractable('knowledge_article')).toBe(false);
+    expect(isExtractable('deal')).toBe(false);
   });
 
   test('connector reference types have correct path_prefixes', () => {
@@ -68,6 +70,25 @@ describe('gbrain-bravura company-brain pack', () => {
     expect(byName.get('responsive_qa')!.path_prefixes).toContain('responsive/');
     expect(byName.get('documentation')!.path_prefixes).toContain('paligo/');
     expect(byName.get('knowledge_article')!.path_prefixes).toContain('salesforce-kb/');
+  });
+
+  test('v1.4: deal types sales/opportunities/ pages (Salesforce opportunity ingest)', () => {
+    const byName = new Map(pack.page_types.map((t) => [t.name, t]));
+    const deal = byName.get('deal')!;
+    expect(deal.primitive).toBe('temporal');
+    expect(deal.path_prefixes).toContain('sales/opportunities/');
+    expect(deal.path_prefixes).toContain('deals/');
+    expect(deal.extractable).toBe(false);
+    expect(deal.expert_routing).toBe(false);
+  });
+
+  test('v1.4: deal account frontmatter wires for_customer with a customers/ dir hint', () => {
+    const fl = (pack.frontmatter_links ?? []).find(
+      (l) => l.page_type === 'deal' && l.fields.includes('account'),
+    );
+    expect(fl?.link_type).toBe('for_customer');
+    expect(fl?.target_dirs).toEqual(['customers/']);
+    expect(fl?.fields).toContain('for_customer'); // verb-named field, v1.3 convention
   });
 
   test('customer has expert_routing enabled in v1.1', () => {
