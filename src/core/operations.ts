@@ -194,6 +194,44 @@ export function matchesSlugAllowList(slug: string, prefixes: readonly string[]):
 }
 
 /**
+ * #F-C — shared subagent slug-scope gate for slug-addressed WRITE ops
+ * (put_page since v0.15; add_tag / remove_tag / add_timeline_entry since
+ * they joined BRAIN_TOOL_ALLOWLIST). Confines LLM-driven writes to
+ * `wiki/agents/<subagentId>/...` — no leading slash (slug grammar rejects
+ * that), anchored, slash-boundary to defeat prefix collisions like
+ * `wiki/agents/12evil/*` impersonating subagent 12 — unless the
+ * trusted-workspace allow-list is set (cycle.ts / campaign dispatch under
+ * PROTECTED_JOB_NAMES; MCP cannot reach that branch), in which case the
+ * allow-list bounds the write instead.
+ *
+ * FAIL-CLOSED: `viaSubagent=true` enforces the check even if the
+ * dispatcher forgot to populate `subagentId`. Agent-originated writes
+ * without an owning subagent id are rejected outright. No-op for
+ * non-subagent callers (CLI / MCP), whose trust model is scope-based.
+ */
+function enforceSubagentWriteScope(ctx: OperationContext, slug: string, opName: string): void {
+  if (ctx.viaSubagent !== true) return;
+  if (typeof ctx.subagentId !== 'number' || Number.isNaN(ctx.subagentId)) {
+    throw new OperationError('permission_denied', `${opName} via subagent requires ctx.subagentId`);
+  }
+  const allowList = ctx.allowedSlugPrefixes;
+  if (allowList && allowList.length > 0) {
+    if (!matchesSlugAllowList(slug, allowList)) {
+      throw new OperationError(
+        'permission_denied',
+        `${opName} slug '${slug}' is not within the trusted-workspace allow-list (${allowList.join(', ')})`
+      );
+    }
+  } else {
+    // Legacy default: agent-namespace confinement.
+    const prefix = `wiki/agents/${ctx.subagentId}/`;
+    if (!slug.startsWith(prefix) || slug.length === prefix.length) {
+      throw new OperationError('permission_denied', `${opName} via subagent must write under '${prefix}...'`);
+    }
+  }
+}
+
+/**
  * Allowlist validator for uploaded file basenames. Rejects control chars, backslashes,
  * RTL overrides (\u202E), leading dot (hidden files) and leading dash (CLI flag confusion).
  * Allows extension dots and underscores. Max 255 chars.
@@ -783,37 +821,9 @@ const put_page: Operation = {
     }
 
     // Subagent namespace enforcement (v0.15+). Runs BEFORE the dry-run
-    // short-circuit so preview calls surface the same rejection. Confines
-    // LLM-driven writes to wiki/agents/<subagentId>/... — no leading slash
-    // (slug grammar rejects that), anchored, slash-boundary to defeat prefix
-    // collisions like `wiki/agents/12evil/*` impersonating subagent 12.
-    //
-    // FAIL-CLOSED: `viaSubagent=true` enforces the check even if the
-    // dispatcher forgot to populate `subagentId`. Agent-originated writes
-    // without an owning subagent id are rejected outright.
-    if (ctx.viaSubagent === true) {
-      if (typeof ctx.subagentId !== 'number' || Number.isNaN(ctx.subagentId)) {
-        throw new OperationError('permission_denied', 'put_page via subagent requires ctx.subagentId');
-      }
-      const allowList = ctx.allowedSlugPrefixes;
-      if (allowList && allowList.length > 0) {
-        // Trusted-workspace path: explicit allow-list bounds writes.
-        // Set only by cycle.ts (synthesize/patterns) which submits subagent
-        // jobs under PROTECTED_JOB_NAMES — MCP cannot reach this branch.
-        if (!matchesSlugAllowList(slug, allowList)) {
-          throw new OperationError(
-            'permission_denied',
-            `put_page slug '${slug}' is not within the trusted-workspace allow-list (${allowList.join(', ')})`
-          );
-        }
-      } else {
-        // Legacy default: agent-namespace confinement.
-        const prefix = `wiki/agents/${ctx.subagentId}/`;
-        if (!slug.startsWith(prefix) || slug.length === prefix.length) {
-          throw new OperationError('permission_denied', `put_page via subagent must write under '${prefix}...'`);
-        }
-      }
-    }
+    // short-circuit so preview calls surface the same rejection. Shared
+    // gate — see enforceSubagentWriteScope for the confinement contract.
+    enforceSubagentWriteScope(ctx, slug, 'put_page');
 
     if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
     // Skip embedding when the AI gateway has no embedding provider configured.
@@ -1893,6 +1903,9 @@ const add_tag: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    // #F-C: subagent-visible write op — same slug-scope gate as put_page,
+    // BEFORE the dry-run short-circuit so previews surface the rejection.
+    enforceSubagentWriteScope(ctx, p.slug as string, 'add_tag');
     if (ctx.dryRun) return { dry_run: true, action: 'add_tag', slug: p.slug, tag: p.tag };
     // v0.31.8 (D7): thread ctx.sourceId.
     const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
@@ -1912,6 +1925,8 @@ const remove_tag: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    // #F-C: subagent-visible write op — same slug-scope gate as put_page.
+    enforceSubagentWriteScope(ctx, p.slug as string, 'remove_tag');
     if (ctx.dryRun) return { dry_run: true, action: 'remove_tag', slug: p.slug, tag: p.tag };
     const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
     await ctx.engine.removeTag(p.slug as string, p.tag as string, sourceOpts);
@@ -2127,6 +2142,8 @@ const add_timeline_entry: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    // #F-C: subagent-visible write op — same slug-scope gate as put_page.
+    enforceSubagentWriteScope(ctx, p.slug as string, 'add_timeline_entry');
     if (ctx.dryRun) return { dry_run: true, action: 'add_timeline_entry', slug: p.slug };
     const date = p.date as string;
     // Reject anything that isn't a strict YYYY-MM-DD with year 1900-2199 and

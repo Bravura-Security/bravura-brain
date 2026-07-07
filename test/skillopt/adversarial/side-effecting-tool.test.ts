@@ -11,6 +11,7 @@
 import { describe, expect, test } from 'bun:test';
 import { READ_ONLY_BRAIN_TOOLS } from '../../../src/core/skillopt/rollout.ts';
 import { BRAIN_TOOL_ALLOWLIST } from '../../../src/core/minions/tools/brain-allowlist.ts';
+import { operations } from '../../../src/core/operations.ts';
 
 describe('adversarial: D13 read-only tool sandbox', () => {
   test('put_page is NOT in the SkillOpt allowlist', () => {
@@ -51,6 +52,11 @@ describe('adversarial: D13 read-only tool sandbox', () => {
       'put_page',
       'submit_job',
       'file_upload',
+      // #F-C enrichment writes (subagent allowlist widened; rollouts must not see them).
+      'add_tag',
+      'remove_tag',
+      'extract_facts',
+      'add_timeline_entry',
       // Future mutating ops: add here when they ship in BRAIN_TOOL_ALLOWLIST.
     ]);
     for (const forbidden of FORBIDDEN_IN_SKILLOPT_ROLLOUTS) {
@@ -58,7 +64,17 @@ describe('adversarial: D13 read-only tool sandbox', () => {
     }
   });
 
-  test('SkillOpt allowlist size = BRAIN_TOOL_ALLOWLIST size minus 1 (put_page)', () => {
-    expect(READ_ONLY_BRAIN_TOOLS.size).toBe(BRAIN_TOOL_ALLOWLIST.size - 1);
+  test('STRUCTURAL GUARD: no op with mutating=true is in the SkillOpt allowlist', () => {
+    // #F-C hardened READ_ONLY_BRAIN_TOOLS to filter on the op-metadata
+    // `mutating` flag instead of a name list, so this holds by construction —
+    // pin it anyway in case the derivation regresses to name-listing.
+    const mutating = new Set(operations.filter(o => o.mutating === true).map(o => o.name));
+    for (const name of READ_ONLY_BRAIN_TOOLS) {
+      expect(mutating.has(name)).toBe(false);
+    }
+  });
+
+  test('SkillOpt allowlist size = BRAIN_TOOL_ALLOWLIST size minus the 5 mutating ops', () => {
+    expect(READ_ONLY_BRAIN_TOOLS.size).toBe(BRAIN_TOOL_ALLOWLIST.size - 5);
   });
 });

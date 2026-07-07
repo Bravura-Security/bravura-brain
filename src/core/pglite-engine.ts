@@ -3716,8 +3716,25 @@ export class PGLiteEngine implements BrainEngine {
   async deleteFactsForPage(
     slug: string,
     source_id: string,
-    opts?: { excludeSourcePrefixes?: string[] },
+    opts?: { excludeSourcePrefixes?: string[]; onlySourcePrefixes?: string[] },
   ): Promise<{ deleted: number }> {
+    const only = opts?.onlySourcePrefixes;
+    if (only && only.length > 0 && opts?.excludeSourcePrefixes && opts.excludeSourcePrefixes.length > 0) {
+      throw new Error('deleteFactsForPage: onlySourcePrefixes and excludeSourcePrefixes are mutually exclusive');
+    }
+    if (only && only.length > 0) {
+      // #F-A: narrow wipe — ONLY rows whose source matches a given prefix
+      // (the frontmatter-promotion replace-on-reimport path). Fence-owned
+      // rows (NULL/empty source) and every other writer's rows survive.
+      const patterns = only.map(p => `${p}%`);
+      const result = await this.db.query(
+        `DELETE FROM facts
+           WHERE source_id = $1 AND source_markdown_slug = $2
+             AND COALESCE(source, '') LIKE ANY($3::text[])`,
+        [source_id, slug, patterns],
+      );
+      return { deleted: result.affectedRows ?? 0 };
+    }
     const prefixes = opts?.excludeSourcePrefixes;
     if (prefixes && prefixes.length > 0) {
       // #1928: keep rows whose `source` matches an excluded prefix (e.g.

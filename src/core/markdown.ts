@@ -120,8 +120,31 @@ export function parseMarkdown(
   // When YAML parsing failed (rare; gray-matter is forgiving), fall back to
   // empty frontmatter + raw content as the body so non-validate callers still
   // get a usable shape.
-  const frontmatter = (parsed?.data ?? {}) as Record<string, unknown>;
-  const body = parsed?.content ?? content;
+  let frontmatter = (parsed?.data ?? {}) as Record<string, unknown>;
+  let body = parsed?.content ?? content;
+
+  // Frontmatter-as-body salvage (#F-B). Two failure shapes land the raw
+  // `---` block in the stored body, where it chunks as prose and produces
+  // zero frontmatter-derived edges/tags:
+  //   1. matter() THREW — agent-authored YAML with an unquoted scalar
+  //      containing ': ' (verified live: `event: Case opened (Priority:
+  //      Normal) ...` on support/cases/case-00024476) is a js-yaml
+  //      hard error, so `body` above falls back to the full raw content.
+  //   2. matter() returned empty data — the block isn't at byte 0 (leading
+  //      blank line / whitespace), so gray-matter never engaged.
+  // Salvage only fires when gray-matter produced NO frontmatter (so a
+  // successfully parsed document is never second-guessed) and the body
+  // LEADS with a `---` fence (mid-document `---` horizontal rules can't
+  // trigger it). The block must parse — verbatim or after the quoted-colon
+  // repair — to a YAML mapping with ≥1 key; prose between two rules parses
+  // to a scalar and is left untouched.
+  if (Object.keys(frontmatter).length === 0) {
+    const salvaged = salvageLeadingFrontmatter(body);
+    if (salvaged) {
+      frontmatter = salvaged.data;
+      body = salvaged.body;
+    }
+  }
 
   const { compiled_truth, timeline } = splitBody(body);
 
@@ -156,6 +179,104 @@ export function parseMarkdown(
   };
   if (opts?.validate) result.errors = errors;
   return result;
+}
+
+/**
+ * #F-B — lenient recovery of a LEADING `---` YAML block that gray-matter
+ * refused to parse. Returns the recovered mapping + the body with the block
+ * stripped, or null when the content doesn't lead with a well-delimited
+ * block (or the block isn't a YAML mapping even after repair).
+ *
+ * Detection rules (false-positive guards):
+ *   - The FIRST non-empty line (after optional BOM) must be exactly `---`.
+ *     Anything else before it disqualifies — `---` later in a document is a
+ *     markdown horizontal rule, never frontmatter.
+ *   - A closing `---` (or YAML document-end `...`) line must exist.
+ *   - The block must yaml-parse — verbatim, or after repairYamlColonScalars —
+ *     to a plain object with at least one key. Prose between two horizontal
+ *     rules parses to a scalar/sequence (or throws) and is rejected.
+ *
+ * Exported for unit tests.
+ */
+export function salvageLeadingFrontmatter(
+  content: string,
+): { data: Record<string, unknown>; body: string } | null {
+  const src = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const lines = src.split('\n');
+
+  // The first non-empty line decides: `---` → candidate block; anything
+  // else → not a leading block, bail immediately.
+  let open = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].replace(/\r$/, '').trim();
+    if (t === '') continue;
+    if (t === '---') open = i;
+    break;
+  }
+  if (open === -1) return null;
+
+  let close = -1;
+  for (let i = open + 1; i < lines.length; i++) {
+    const t = lines[i].replace(/\r$/, '').trim();
+    if (t === '---' || t === '...') { close = i; break; }
+  }
+  if (close === -1) return null;
+
+  // Strip trailing \r per line so CRLF content yaml-parses and the repair
+  // pass never quotes a stray carriage return into a scalar.
+  const block = lines.slice(open + 1, close).map((l) => l.replace(/\r$/, '')).join('\n');
+  if (!block.trim()) return null;
+  const body = lines.slice(close + 1).join('\n');
+
+  for (const candidate of [block, repairYamlColonScalars(block)]) {
+    try {
+      const data = yamlSafeLoad(candidate);
+      if (
+        data !== null &&
+        typeof data === 'object' &&
+        !Array.isArray(data) &&
+        Object.keys(data as Record<string, unknown>).length > 0
+      ) {
+        return { data: data as Record<string, unknown>, body };
+      }
+    } catch {
+      // try the repaired variant / fall through to null
+    }
+  }
+  return null;
+}
+
+/**
+ * #F-B — repair the dominant agent-authored YAML error class: an unquoted
+ * plain scalar containing `: ` (or ending with `:`), which js-yaml rejects
+ * with "mapping values are not allowed here". E.g.
+ *
+ *   event: Case opened (Priority: Normal) by contact Said Mounaji
+ *
+ * becomes
+ *
+ *   event: "Case opened (Priority: Normal) by contact Said Mounaji"
+ *
+ * Only lines shaped `key: value` (optionally as a `- ` list item, at any
+ * indentation) are touched, and only when the value is not already quoted
+ * and not a flow/block-scalar/anchor construct. Everything else passes
+ * through verbatim.
+ */
+function repairYamlColonScalars(block: string): string {
+  return block
+    .split('\n')
+    .map((line) => {
+      const m = line.match(/^(\s*(?:-\s+)?[A-Za-z0-9_./-]+:[ \t]+)(\S.*)$/);
+      if (!m) return line;
+      const value = m[2];
+      // Already quoted, flow collection, block scalar, anchor/alias/tag →
+      // structured YAML the author meant; leave alone.
+      if (/^['"[{|>&*!]/.test(value)) return line;
+      if (!value.includes(': ') && !value.endsWith(':')) return line;
+      // JSON.stringify gives a double-quoted, escape-correct YAML scalar.
+      return m[1] + JSON.stringify(value);
+    })
+    .join('\n');
 }
 
 /**

@@ -39,6 +39,10 @@ import { normalizeAliasList } from './search/alias-normalize.ts';
 import { isUndefinedTableError, warnOncePerProcess } from './utils.ts';
 import { computeCorpusGeneration } from './contextual-retrieval-service.ts';
 import { runGuardrails } from './guardrails.ts';
+import {
+  hasPromotableFrontmatter,
+  promoteFrontmatterKnowledge,
+} from './frontmatter-promotion.ts';
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -560,6 +564,31 @@ export async function importFromContent(
 
   const existing = await engine.getPage(slug, sourceId ? { sourceId } : undefined);
   if (existing?.content_hash === hash && !opts.forceRechunk) {
+    // #F-A heal mode: pages imported BEFORE the frontmatter-promotion
+    // feature (or re-put unchanged by a backfill agent) short-circuit here
+    // and would otherwise never get their key_outcomes/timeline promoted.
+    // Heal is cheap and gated: it fires only for pages that actually carry
+    // promotable frontmatter, facts insert only when the page has zero
+    // 'import:'-sourced rows, and timeline rides ON CONFLICT DO NOTHING.
+    // Fail-soft — a promotion error must not turn a clean skip into a
+    // failure (pre-v40 brains have no facts table).
+    if (hasPromotableFrontmatter(parsed.frontmatter)) {
+      try {
+        await promoteFrontmatterKnowledge(engine, slug, parsed.frontmatter, {
+          sourceId,
+          noEmbed: opts.noEmbed,
+          effectiveDate: existing.effective_date ? new Date(existing.effective_date) : null,
+          mode: 'heal',
+        });
+      } catch (e) {
+        if (!isUndefinedTableError(e)) {
+          warnOncePerProcess(
+            'frontmatterPromotion:heal:failed',
+            `[import] frontmatter promotion (heal) failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+    }
     return { slug, status: 'skipped', chunks: 0, parsedPage };
   }
 
@@ -729,25 +758,28 @@ export async function importFromContent(
   // schema DEFAULT — required for multi-source brains; harmless ('default')
   // for single-source callers.
   const txOpts = sourceId ? { sourceId } : undefined;
+
+  // v0.29.1 — compute effective_date from frontmatter precedence chain.
+  // Filename comes from importFromFile path (basename) or the slug tail
+  // (put_page MCP op fallback). updatedAt/createdAt use the existing
+  // page's timestamps when present; otherwise NOW() (the row about to
+  // be created). The result drives the recency boost and since/until
+  // filters when callers opt in; nothing in the default search path
+  // consults it. (#F-A hoisted this out of the transaction — it's a pure
+  // computation, and the frontmatter-promotion hook below reuses
+  // effectiveDate as facts.valid_from.)
+  const filenameForChain = opts.filename ?? slug.split('/').pop() ?? slug;
+  const nowDate = new Date();
+  const { date: effectiveDate, source: effectiveDateSource } = computeEffectiveDate({
+    slug,
+    frontmatter: parsed.frontmatter,
+    filename: filenameForChain,
+    updatedAt: existing?.updated_at ?? nowDate,
+    createdAt: existing?.created_at ?? nowDate,
+  });
+
   await engine.transaction(async (tx) => {
     if (existing) await tx.createVersion(slug, txOpts);
-
-    // v0.29.1 — compute effective_date from frontmatter precedence chain.
-    // Filename comes from importFromFile path (basename) or the slug tail
-    // (put_page MCP op fallback). updatedAt/createdAt use the existing
-    // page's timestamps when present; otherwise NOW() (the row about to
-    // be created). The result drives the recency boost and since/until
-    // filters when callers opt in; nothing in the default search path
-    // consults it.
-    const filenameForChain = opts.filename ?? slug.split('/').pop() ?? slug;
-    const nowDate = new Date();
-    const { date: effectiveDate, source: effectiveDateSource } = computeEffectiveDate({
-      slug,
-      frontmatter: parsed.frontmatter,
-      filename: filenameForChain,
-      updatedAt: existing?.updated_at ?? nowDate,
-      createdAt: existing?.created_at ?? nowDate,
-    });
 
     await tx.putPage(slug, {
       type: parsed.type,
@@ -880,6 +912,37 @@ export async function importFromContent(
         'setPageAliases:failed',
         `[import] page_aliases projection failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
       );
+    }
+  }
+
+  // #F-A — deterministic frontmatter → structured-knowledge promotion.
+  // key_outcomes → facts (wipe-then-reinsert scoped to 'import:'-sourced
+  // rows; entity from for_customer; valid_from = the page's effective
+  // date), timeline (list of {date, event}) → timeline_entries (same
+  // ON CONFLICT dedupe as add_timeline_entry). Runs AFTER the page write
+  // commits so the slug exists for the timeline page_id JOIN. Gated on
+  // promotable frontmatter being present (previous OR current — removal
+  // must clear stale promoted facts) so the common page pays nothing.
+  // Fail-soft like the aliases projection above: pre-v40 brains have no
+  // facts table; a promotion error never fails the import.
+  const previousFrontmatter =
+    (existing?.frontmatter as Record<string, unknown> | undefined) ?? null;
+  if (hasPromotableFrontmatter(parsed.frontmatter) || hasPromotableFrontmatter(previousFrontmatter)) {
+    try {
+      await promoteFrontmatterKnowledge(engine, slug, parsed.frontmatter, {
+        sourceId,
+        noEmbed: opts.noEmbed,
+        effectiveDate,
+        previousFrontmatter,
+        mode: 'import',
+      });
+    } catch (e) {
+      if (!isUndefinedTableError(e)) {
+        warnOncePerProcess(
+          'frontmatterPromotion:failed',
+          `[import] frontmatter promotion failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     }
   }
 

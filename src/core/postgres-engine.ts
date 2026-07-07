@@ -3807,10 +3807,27 @@ export class PostgresEngine implements BrainEngine {
   async deleteFactsForPage(
     slug: string,
     source_id: string,
-    opts?: { excludeSourcePrefixes?: string[] },
+    opts?: { excludeSourcePrefixes?: string[]; onlySourcePrefixes?: string[] },
   ): Promise<{ deleted: number }> {
     const sql = this.sql;
+    const only = opts?.onlySourcePrefixes;
     const prefixes = opts?.excludeSourcePrefixes;
+    if (only && only.length > 0 && prefixes && prefixes.length > 0) {
+      throw new Error('deleteFactsForPage: onlySourcePrefixes and excludeSourcePrefixes are mutually exclusive');
+    }
+    if (only && only.length > 0) {
+      // #F-A: narrow wipe — ONLY rows whose source matches a given prefix
+      // (the frontmatter-promotion replace-on-reimport path). Fence-owned
+      // rows (NULL/empty source) and every other writer's rows survive.
+      const patterns = only.map(p => `${p}%`);
+      const result = await sql`
+        DELETE FROM facts
+        WHERE source_id = ${source_id}
+          AND source_markdown_slug = ${slug}
+          AND COALESCE(source, '') LIKE ANY(${patterns})
+      `;
+      return { deleted: result.count ?? 0 };
+    }
     if (prefixes && prefixes.length > 0) {
       // #1928: keep rows whose `source` matches an excluded prefix (e.g.
       // `cli:` conversation facts). COALESCE so NULL/empty-source fence rows

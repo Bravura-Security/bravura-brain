@@ -40,6 +40,9 @@ import type { ToolCtx, ToolDef } from '../types.ts';
  *
  * Conditional write:
  *   put_page (namespace-enforced by the tool schema + server-side check)
+ *   add_tag / remove_tag / add_timeline_entry (#F-C — same server-side
+ *   slug-scope gate as put_page)
+ *   extract_facts (#F-C — no slug; bound-source hot-memory write)
  *
  * Every name below MUST exist in src/core/operations.ts OPERATIONS; the
  * brain-allowlist test pins this invariant so an upstream rename fails CI
@@ -68,6 +71,21 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   // The cycle synthesize phase already calls discoverTranscripts directly.
   'get_recent_salience',
   'find_anomalies',
+  // #F-C — enrichment writes. Pre-fix, scoped agents tunneled tags through
+  // put_page frontmatter (rewriting the whole page to add one tag) and had
+  // no direct facts/timeline surface at all. All four are scope:'write' ops.
+  // Slug-addressed ones (add_tag / remove_tag / add_timeline_entry) are
+  // bounded by the SAME server-side gate as put_page
+  // (enforceSubagentWriteScope in src/core/operations.ts): trusted-workspace
+  // allow-list when set, else the wiki/agents/<id>/ namespace — fail-closed
+  // on missing subagentId. extract_facts takes no slug; it writes to the
+  // per-source hot memory of the agent's BOUND source (ctx.sourceId), the
+  // same blast radius the agent already has via put_page + the facts
+  // backstop, and its turn_text is sanitized via INJECTION_PATTERNS.
+  'add_tag',
+  'remove_tag',
+  'extract_facts',
+  'add_timeline_entry',
 ]);
 
 /**
@@ -99,6 +117,10 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   put_page: 'Write a markdown page to the gbrain DATABASE (NOT the local filesystem). Page becomes searchable + linkable. Slug must match the agent\'s allowed namespace.',
   get_recent_salience: 'Read pages ranked by emotional + activity salience over a recency window. Use for "what\'s been on my mind lately".',
   find_anomalies: 'Read cohort-level activity outliers (e.g. tag-cohort or type-cohort with unusual recent volume). Use for "what\'s unusual lately".',
+  add_tag: 'Add a single tag to a page you can write. Prefer this over rewriting the page via put_page just to change tags.',
+  remove_tag: 'Remove a single tag from a page you can write. Prefer this over rewriting the page via put_page.',
+  extract_facts: 'Extract structured facts (events, preferences, commitments, beliefs) from a text passage into hot memory so `recall` finds them later. Use after learning something durable.',
+  add_timeline_entry: 'Append a dated event (YYYY-MM-DD + summary) to a page\'s structured timeline. Idempotent — duplicate (date, summary) entries are ignored.',
 };
 
 /** Matches Anthropic's tool-name constraint. No dots. */
