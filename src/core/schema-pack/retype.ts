@@ -48,7 +48,10 @@ export interface RetypeRule {
    *  against ALLOWED_SUBTYPE_FIELDS to block third-party-pack injection of
    *  load-bearing keys (title, slug, type). */
   subtype_field?: AllowedSubtypeField;
-  /** Optional source_path LIKE filter for disambiguation. */
+  /** Optional path LIKE filter for disambiguation. Matches
+   *  COALESCE(source_path, slug): fs-synced pages match on their repo path;
+   *  DB-put pages (connector ingest via put_page — source_path is NULL)
+   *  fall back to their slug, which carries the same directory prefix. */
   path_filter?: string;
 }
 
@@ -126,7 +129,10 @@ async function probeRule(
   let where = `WHERE deleted_at IS NULL AND type = $1`;
   const params: unknown[] = [fromType];
   if (pathFilter) {
-    where += ` AND source_path LIKE $${params.length + 1}`;
+    // COALESCE: DB-put pages carry no source_path — fall back to slug so a
+    // prefix filter (e.g. 'confluence/%') still selects connector-ingested
+    // pages. Mirrored in applyRetypeRule's window WHERE.
+    where += ` AND COALESCE(source_path, slug) LIKE $${params.length + 1}`;
     params.push(pathFilter);
   }
   if (sourceId) {
@@ -175,7 +181,8 @@ async function applyRetypeRule(
     const winWhereParts: string[] = [`deleted_at IS NULL`, `type = $1`];
     const winParams: unknown[] = [rule.from_type];
     if (rule.path_filter) {
-      winWhereParts.push(`source_path LIKE $${winParams.length + 1}`);
+      // COALESCE fallback mirrors probeRule (DB-put pages have NULL source_path).
+      winWhereParts.push(`COALESCE(source_path, slug) LIKE $${winParams.length + 1}`);
       winParams.push(rule.path_filter);
     }
     if (sourceId) {

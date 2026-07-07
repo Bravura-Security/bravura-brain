@@ -72,6 +72,11 @@ describe('gbrain-bravura company-brain pack', () => {
     expect(byName.get('knowledge_article')!.path_prefixes).toContain('salesforce-kb/');
   });
 
+  test('v1.5: documentation also types confluence/ pages', () => {
+    const byName = new Map(pack.page_types.map((t) => [t.name, t]));
+    expect(byName.get('documentation')!.path_prefixes).toEqual(['paligo/', 'confluence/']);
+  });
+
   test('v1.4: deal types sales/opportunities/ pages (Salesforce opportunity ingest)', () => {
     const byName = new Map(pack.page_types.map((t) => [t.name, t]));
     const deal = byName.get('deal')!;
@@ -105,6 +110,19 @@ describe('gbrain-bravura company-brain pack', () => {
     expect(fromTypes).toContain('knowledge_article');
   });
 
+  test('v1.5: concept→documentation retype rule migrates confluence/ pages, prefix-scoped', () => {
+    const rule = (pack.mapping_rules ?? []).find(
+      (r) => r.kind === 'retype' && r.from_type === 'concept',
+    );
+    expect(rule).toBeDefined();
+    if (rule?.kind !== 'retype') throw new Error('expected retype rule');
+    expect(rule.to_type).toBe('documentation');
+    expect(rule.subtype_field).toBe('origin');
+    expect(rule.subtype).toBe('confluence');
+    // Without the path_filter this rule would swallow every real concept page.
+    expect(rule.path_filter).toBe('confluence/%');
+  });
+
   test('declares the Bravura link verbs with inverses', () => {
     const inv = new Map(pack.link_types.map((l) => [l.name, l.inverse]));
     expect(inv.get('for_customer')).toBe('has_case');
@@ -112,6 +130,15 @@ describe('gbrain-bravura company-brain pack', () => {
     expect(inv.get('caused_by')).toBe('causes');
     expect(inv.get('resolved_by')).toBe('resolves');
     expect(inv.get('escalated_to')).toBe('handled_by');
+    expect(inv.get('works_on')).toBe('worked_on_by'); // v1.5
+  });
+
+  test('v1.5: person works_on frontmatter wires works_on edges with a products/ dir hint', () => {
+    const fl = (pack.frontmatter_links ?? []).find(
+      (l) => l.page_type === 'person' && l.fields.includes('works_on'),
+    );
+    expect(fl?.link_type).toBe('works_on');
+    expect(fl?.target_dirs).toEqual(['products/']);
   });
 
   test('v1.3: verb-named frontmatter fields (for_customer, affects_product) are mapped', () => {

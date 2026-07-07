@@ -21,7 +21,7 @@
 
 api_version: gbrain-schema-pack-v1
 name: gbrain-bravura
-version: 1.4.0
+version: 1.5.0
 gbrain_min_version: 0.39.0
 extends: gbrain-recommended
 description: "Bravura Security unified company brain. Spans support (cases, patterns, KB), internal knowledge (concepts, processes, products, people, teams), and sales (deals live via Salesforce opportunities; RFPs stubbed). Two-layer compiled-truth pages authored by the nightly enrich agent from raw inbox signals; reference content (Paligo / Confluence-KB / SF-KB / Responsive / opportunities) ingested DB-direct."
@@ -168,11 +168,16 @@ page_types:
     expert_routing: false
 
   - name: documentation
-    # Paligo DocBook topics. Transformer stamps type=documentation; origin=paligo.
-    # Slug prefix: paligo/<topic-id>-s<chunk>.
+    # Paligo DocBook topics (origin=paligo, slug prefix paligo/<topic-id>-s<chunk>)
+    # + v1.5: Confluence KB pages (origin=confluence, slug prefix
+    # confluence/confluence-<page-id>). Both are connector-stamped reference
+    # documentation; the confluence/ prefix adoption comes with a retype
+    # mapping_rule below that migrates the pre-v1.5 concept-typed confluence
+    # pages.
     primitive: media
     path_prefixes:
       - paligo/
+      - confluence/
     aliases: []
     extractable: false
     expert_routing: false
@@ -215,6 +220,14 @@ link_types:
     inverse: owned_by
   - name: documents
     inverse: documented_by
+  # v1.5 — person → product_area expertise wire. The dream/backfill agents
+  # stamp `works_on: [products/<slug>]` on person stubs (replacing the interim
+  # `mentions:` wire); the frontmatter_links mapping below turns it into typed
+  # edges. find_experts itself is content-search over expert_routing types
+  # (person already has expert_routing: true via gbrain-base) — the typed edge
+  # feeds graph traversal + relational retrieval.
+  - name: works_on
+    inverse: worked_on_by
 
 # Frontmatter field → link verb. Page-typed: the SOURCE page's type selects
 # which mapping applies. Direction is outgoing (page → resolved target)
@@ -259,6 +272,13 @@ frontmatter_links:
     fields: [team]
     link_type: member_of
     target_dirs: [teams/]
+  # v1.5: person works_on — list of products/<slug> refs (slug-form, written
+  # by the dream/backfill agents) or display names; products/ dir hint keeps
+  # resolution prefix-scoped either way.
+  - page_type: person
+    fields: [works_on]
+    link_type: works_on
+    target_dirs: [products/]
   - page_type: team
     fields: [members, key_people]
     link_type: has_member
@@ -352,3 +372,15 @@ mapping_rules:
     to_type: knowledge_article
     subtype_field: origin
     subtype: salesforce-kb
+
+  # v1.5 — migrate the pre-v1.5 confluence pages. Before this version the
+  # confluence/ prefix was undeclared, so connector-written Confluence pages
+  # fell back to type=concept. path_filter scopes the retype to the
+  # confluence/ slug namespace (DB-put pages have no source_path; the filter
+  # matches COALESCE(source_path, slug)) so real concept pages are untouched.
+  - kind: retype
+    from_type: concept
+    to_type: documentation
+    subtype_field: origin
+    subtype: confluence
+    path_filter: confluence/%
