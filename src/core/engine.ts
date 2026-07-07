@@ -1711,11 +1711,18 @@ export interface BrainEngine {
    * never recreate them (the page has no `## Facts` fence). Omitted ⇒ legacy
    * behavior (delete every fact on the page coordinate). NULL/empty `source`
    * rows are always deletable (fence default).
+   *
+   * #F-A: `onlySourcePrefixes` is the inverse — delete ONLY rows whose
+   * `source` matches a given prefix (e.g. `['import:']` for the
+   * frontmatter-promotion wipe-then-reinsert), leaving fence-owned and every
+   * other row on the page coordinate untouched. Mutually exclusive with
+   * `excludeSourcePrefixes`; passing both throws (fail-loud — silently
+   * picking one would mask a caller bug).
    */
   deleteFactsForPage(
     slug: string,
     source_id: string,
-    opts?: { excludeSourcePrefixes?: string[] },
+    opts?: { excludeSourcePrefixes?: string[]; onlySourcePrefixes?: string[] },
   ): Promise<{ deleted: number }>;
 
   /**

@@ -227,9 +227,13 @@ export async function runExtractFacts(
     // partial-UNIQUE-index keyspace). #1928: `cli:`-origin facts (conversation
     // facts from extract-conversation-facts) are NOT fence-owned — the page
     // carries no `## Facts` fence to recreate them — so they MUST survive this
-    // reconcile. Exclude them from the wipe.
+    // reconcile. Exclude them from the wipe. #F-A: same contract for
+    // `import:`-origin facts (frontmatter key_outcomes promotion,
+    // src/core/frontmatter-promotion.ts) — recreated from frontmatter at
+    // import time, never from the fence; a full-walk cycle on a fence-less
+    // dream/backfill page would otherwise silently destroy them.
     const deleted = await engine.deleteFactsForPage(slug, sourceId, {
-      excludeSourcePrefixes: ['cli:'],
+      excludeSourcePrefixes: ['cli:', 'import:'],
     });
     result.factsDeleted += deleted.deleted;
 

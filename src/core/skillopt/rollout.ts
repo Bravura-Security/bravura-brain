@@ -27,12 +27,19 @@ import type { BenchmarkTask, Trajectory } from './types.ts';
 /**
  * D13: which tools SkillOpt rollouts are allowed to call.
  *
- * Derived from BRAIN_TOOL_ALLOWLIST minus `put_page` (only mutating op in
- * the base set). New mutating ops MUST be added here AND BRAIN_TOOL_ALLOWLIST
- * mustn't be silently widened; the rollout test pins zero-write invariant.
+ * Derived from BRAIN_TOOL_ALLOWLIST minus every `mutating` op. #F-C widened
+ * the allowlist with four write ops (add_tag / remove_tag / extract_facts /
+ * add_timeline_entry) on top of put_page; filtering on the op-metadata
+ * `mutating` flag (instead of the old name-list `!== 'put_page'`) makes the
+ * zero-write invariant structural — any future mutating op added to
+ * BRAIN_TOOL_ALLOWLIST is excluded here automatically. The rollout test
+ * pins the invariant.
  */
+const MUTATING_OP_NAMES: ReadonlySet<string> = new Set(
+  operations.filter((o) => o.mutating === true).map((o) => o.name),
+);
 export const READ_ONLY_BRAIN_TOOLS: ReadonlySet<string> = new Set(
-  [...BRAIN_TOOL_ALLOWLIST].filter((name) => name !== 'put_page'),
+  [...BRAIN_TOOL_ALLOWLIST].filter((name) => !MUTATING_OP_NAMES.has(name)),
 );
 
 export interface RolloutOpts {

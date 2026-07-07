@@ -400,6 +400,31 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
     }
   }
 
+  // #F-D — oauth_clients.source_id → sources(id) is ON DELETE RESTRICT, so a
+  // source with any bound OAuth client made the DELETE below fail with an
+  // opaque FK violation (live-verified: required a manual `gbrain auth
+  // revoke-client` first). Resolve it explicitly BEFORE any side effects:
+  //   - clients still holding token rows → ABORT with a paste-ready
+  //     revoke-client command per client (revoke cascades tokens + codes).
+  //   - token-less clients (registration leftovers) → hard-delete here;
+  //     nothing references them.
+  const oauth = await cleanupSourceOauthClients(engine, id);
+  if (oauth.blocked.length > 0) {
+    console.error(
+      `Error: cannot remove source "${id}" — ${oauth.blocked.length} OAuth client(s) bound to it still hold tokens:`,
+    );
+    for (const cid of oauth.blocked) {
+      console.error(`  gbrain auth revoke-client "${cid}"`);
+    }
+    console.error('Revoke each client above (cascades its tokens + codes), then re-run sources remove.');
+    process.exit(6);
+  }
+  if (oauth.deleted.length > 0) {
+    console.log(
+      `Deleted ${oauth.deleted.length} token-less OAuth client(s) bound to "${id}": ${oauth.deleted.join(', ')}`,
+    );
+  }
+
   // v0.42.44 — tear down durability scaffolding BEFORE the row is deleted (we
   // need the path/label while it still exists). Best-effort; tolerates missing
   // repo/cron/credential independently.
@@ -413,6 +438,43 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
   await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
   const pageCount = impact?.pageCount ?? 0;
   console.log(`Removed source "${id}" (${pageCount} pages + dependent rows cascaded).`);
+}
+
+/**
+ * #F-D — pre-clean the ON DELETE RESTRICT edge from oauth_clients to a
+ * source about to be removed.
+ *
+ * Returns `blocked` (client_ids that still hold oauth_tokens rows — the
+ * caller must abort and tell the operator to `gbrain auth revoke-client`
+ * each) and `deleted` (token-less client_ids that were hard-deleted, which
+ * cascades their oauth_codes). NOTHING is deleted when `blocked` is
+ * non-empty — an abort must leave the brain exactly as found.
+ *
+ * "Holds tokens" deliberately counts EXPIRED token rows too: an expired row
+ * is still an FK edge, and revoke-client is the single sanctioned way to
+ * cascade it away. Exported for tests.
+ */
+export async function cleanupSourceOauthClients(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<{ deleted: string[]; blocked: string[] }> {
+  const clients = await engine.executeRaw<{ client_id: string; has_tokens: boolean }>(
+    `SELECT c.client_id,
+            EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = c.client_id) AS has_tokens
+     FROM oauth_clients c
+     WHERE c.source_id = $1
+     ORDER BY c.client_id`,
+    [sourceId],
+  );
+  const blocked = clients.filter((c) => c.has_tokens === true).map((c) => c.client_id);
+  if (blocked.length > 0) {
+    return { deleted: [], blocked };
+  }
+  const tokenless = clients.map((c) => c.client_id);
+  if (tokenless.length > 0) {
+    await engine.executeRaw(`DELETE FROM oauth_clients WHERE source_id = $1`, [sourceId]);
+  }
+  return { deleted: tokenless, blocked: [] };
 }
 
 // ── Subcommand: archive (soft-delete) ───────────────────────

@@ -90,6 +90,9 @@ export const BATCH_AUDIT_SITES = [
   'extract.stale',
   // operations.ts MCP put_page auto-link path.
   'mcp.put_page.autolink',
+  // import-file.ts frontmatter promotion (#F-A): timeline entries promoted
+  // from `timeline:` frontmatter at import time.
+  'import.frontmatter_promotion',
   // sync.ts/reindex.ts orchestrator labels.
   'sync.import_file',
   'reindex.markdown',

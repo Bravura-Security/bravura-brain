@@ -44,13 +44,19 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     expect(missing).toEqual([]);
   });
 
-  test('contains the v0.15 read-only 10 + put_page + v0.29 salience pair + v114 list_link_sources', () => {
+  test('contains the v0.15 read-only 10 + put_page + v0.29 salience pair + v114 list_link_sources + #F-C enrichment writes', () => {
     // v0.29 added get_recent_salience + find_anomalies (read-only).
     // get_recent_transcripts is deliberately excluded — subagent calls always
     // have ctx.remote=true, and the v0.29 trust gate rejects remote callers.
     // v114 (#1941) added list_link_sources (read-only provenance discovery);
     // the edge-WRITE ops add_link/remove_link stay out (separate trust call).
-    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(14);
+    // #F-C added add_tag / remove_tag / extract_facts / add_timeline_entry
+    // (enrichment writes; slug-addressed ones share put_page's scope gate).
+    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(18);
+    expect(BRAIN_TOOL_ALLOWLIST.has('add_tag')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('remove_tag')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('extract_facts')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('add_timeline_entry')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('query')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('search')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('get_page')).toBe(true);
@@ -141,6 +147,70 @@ describe('buildBrainTools', () => {
         { slug: 'wiki/analysis/stomp', content: '---\ntitle: x\n---\nb' },
         ctx,
       ),
+    ).rejects.toBeInstanceOf(OperationError);
+  });
+
+  // #F-C — the new slug-addressed write ops share put_page's subagent
+  // slug-scope gate (enforceSubagentWriteScope). Out-of-namespace rejects;
+  // in-namespace (or trusted-workspace allow-listed) succeeds.
+  test('execute() on add_tag with out-of-namespace slug throws permission_denied', async () => {
+    const tools = buildBrainTools({ subagentId: 42, engine, config });
+    const addTag = tools.find(t => t.name === 'brain_add_tag');
+    expect(addTag).toBeDefined();
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    await expect(
+      addTag!.execute({ slug: 'people/alice-example', tag: 'vip' }, ctx),
+    ).rejects.toBeInstanceOf(OperationError);
+  });
+
+  test('execute() on add_tag / remove_tag / add_timeline_entry within namespace succeeds', async () => {
+    const tools = buildBrainTools({ subagentId: 42, engine, config });
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    // Create the page first via the subagent's own put_page.
+    const putPage = tools.find(t => t.name === 'brain_put_page');
+    await putPage!.execute(
+      { slug: 'wiki/agents/42/scratch', content: '---\ntitle: Scratch\n---\nbody' },
+      ctx,
+    );
+    const addTag = tools.find(t => t.name === 'brain_add_tag');
+    expect(await addTag!.execute({ slug: 'wiki/agents/42/scratch', tag: 'vip' }, ctx)).toEqual({ status: 'ok' });
+    const tags = await engine.getTags('wiki/agents/42/scratch');
+    expect(tags).toContain('vip');
+
+    const addTimeline = tools.find(t => t.name === 'brain_add_timeline_entry');
+    expect(
+      await addTimeline!.execute(
+        { slug: 'wiki/agents/42/scratch', date: '2026-01-15', summary: 'Something happened' },
+        ctx,
+      ),
+    ).toEqual({ status: 'ok' });
+
+    const removeTag = tools.find(t => t.name === 'brain_remove_tag');
+    expect(await removeTag!.execute({ slug: 'wiki/agents/42/scratch', tag: 'vip' }, ctx)).toEqual({ status: 'ok' });
+  });
+
+  test('execute() on add_timeline_entry with out-of-namespace slug throws permission_denied', async () => {
+    const tools = buildBrainTools({ subagentId: 42, engine, config });
+    const addTimeline = tools.find(t => t.name === 'brain_add_timeline_entry');
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    await expect(
+      addTimeline!.execute(
+        { slug: 'meetings/board-q1', date: '2026-01-15', summary: 'x' },
+        ctx,
+      ),
+    ).rejects.toBeInstanceOf(OperationError);
+  });
+
+  test('trusted-workspace allow-list bounds add_tag like put_page', async () => {
+    const tools = buildBrainTools({
+      subagentId: 42, engine, config,
+      allowedSlugPrefixes: ['support/cases/*'],
+    });
+    const addTag = tools.find(t => t.name === 'brain_add_tag');
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    // Outside the allow-list → rejected even though it's inside the legacy namespace.
+    await expect(
+      addTag!.execute({ slug: 'wiki/agents/42/scratch2', tag: 'x' }, ctx),
     ).rejects.toBeInstanceOf(OperationError);
   });
 });
