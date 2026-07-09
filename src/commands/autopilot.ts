@@ -1056,7 +1056,17 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         const { runNightlyQualityProbe } = await import('../core/cycle/nightly-quality-probe.ts');
         const { runLongMemEvalForProbe, runCrossModalBatchForProbe } = await import('../core/cycle/nightly-probe-adapters.ts');
         const { isAvailable } = await import('../core/ai/gateway.ts');
-        const maxUsd = Number(cfg?.autopilot?.nightly_quality_probe?.max_usd ?? 5);
+        // Config-plane fix: read max_usd from the DB plane FIRST
+        // (engine.getConfig — the same plane autopilot.auto_drain.max_usd_per_day
+        // reads above), so `gbrain config set autopilot.nightly_quality_probe.max_usd`
+        // actually takes effect. Previously only the file plane (loadConfig →
+        // cfg) was consulted and DB-plane sets were silently ignored. The file
+        // plane remains the fallback; default 5.
+        const dbMaxUsdRaw = await engine.getConfig('autopilot.nightly_quality_probe.max_usd');
+        const dbMaxUsd = dbMaxUsdRaw == null || dbMaxUsdRaw === '' ? NaN : Number(dbMaxUsdRaw);
+        const maxUsd = Number.isFinite(dbMaxUsd) && dbMaxUsd >= 0
+          ? dbMaxUsd
+          : Number(cfg?.autopilot?.nightly_quality_probe?.max_usd ?? 5);
         await runNightlyQualityProbe({
           isEnabled: () => true, // already gated above; phase re-checks for defense-in-depth
           hasEmbeddingProvider: () => isAvailable('embedding'),

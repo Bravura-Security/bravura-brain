@@ -9,25 +9,26 @@
 #
 # Companion to gbrain-bravura (the company pack). Where gbrain-bravura spans
 # support/sales/internal, this pack is the individual's operational brain:
-# people, companies, meetings, a daily log, concepts, and projects. It is
-# deliberately thin — gbrain-recommended already supplies almost every type;
-# this pack only ADDS `inbox` (the raw landing zone) plus the personal filing
-# rules + frontmatter links the enrich agent needs.
+# people, companies, meetings, a daily log, concepts, and projects.
 #
 # Design + rationale: personal-agents/ARCHITECTURE.md (collect=client / distill=server).
 
 api_version: gbrain-schema-pack-v1
 name: gbrain-personal
-version: 1.1.0
+version: 1.2.0
 gbrain_min_version: 0.39.0
 extends: gbrain-recommended
 description: "Per-user personal brain. Compiled-truth pages (people, companies, meetings, daily log, concepts, projects) authored by the nightly personal-enrich agent from raw inbox signals collected client-side via the user's own MCPs (Granola, Microsoft 365). Facts come from each source's structured fields — never inferred."
 
-# The base entity/temporal types this pack's filing rules + links reference all
-# arrive via the extends chain (gbrain-recommended → gbrain-base):
-#   person (people/), company (companies/), meeting (meetings/),
-#   concept (concepts/), project (projects/), daily (daily/), source (sources/).
-# borrow_from signals intent; the registry already merges via extends.
+# v1.2.0 — the pack MUST declare every type it files, not "inherit" them.
+# Extends-chain resolution does NOT merge parent page_types
+# (ResolvedPack.manifest is the child manifest only; same bug class as
+# gbrain-bravura v1.5.1), so while only `inbox` was declared here,
+# inferTypeFromPack fell through every prefix for people/ companies/
+# meetings/ daily/ concepts/ projects/ paths and stored untyped distill
+# output as the default 'concept' — breaking the person-scoped works_at
+# frontmatter rule, the meeting-scoped attended rule, and expert routing.
+# borrow_from below signals provenance intent only; it merges NOTHING.
 borrow_from:
   - pack: gbrain-recommended
     types:
@@ -50,6 +51,74 @@ page_types:
     # meeting / email thread / calendar event / chat). The enrich agent reads
     # these, authors compiled-truth pages elsewhere, and archives the source
     # item. Not directly extracted — the agent does that judgment.
+    extractable: false
+    expert_routing: false
+
+  # ---- Compiled-truth types the personal distill files (v1.2.0) ----
+  # Declared LOCALLY (see header note): shapes mirror what the extends
+  # chain WOULD have provided — person/company from gbrain-base,
+  # meeting/concept/project/daily/source from gbrain-recommended — with
+  # path_prefixes matching this pack's filing_rules exactly.
+
+  - name: person
+    primitive: entity
+    path_prefixes:
+      - people/
+    aliases: []
+    extractable: false
+    # People are the personal brain's primary expertise locus: "who do I
+    # know that knows X" (find_experts / whoknows over people/*).
+    expert_routing: true
+
+  - name: company
+    primitive: entity
+    path_prefixes:
+      - companies/
+    aliases: []
+    extractable: false
+    # Companies are an expertise locus too (which org touches what).
+    expert_routing: true
+
+  - name: meeting
+    primitive: temporal
+    path_prefixes:
+      - meetings/
+    aliases: []
+    # Enriched meeting pages carry compiled truth (decisions, action items)
+    # worth mining as facts.
+    extractable: true
+    expert_routing: false
+
+  - name: daily
+    primitive: temporal
+    path_prefixes:
+      - daily/
+    aliases: []
+    extractable: true
+    expert_routing: false
+
+  - name: concept
+    primitive: concept
+    path_prefixes:
+      - concepts/
+    aliases: []
+    extractable: true
+    expert_routing: false
+
+  - name: project
+    primitive: entity
+    path_prefixes:
+      - projects/
+    aliases: []
+    extractable: false
+    expert_routing: false
+
+  - name: source
+    primitive: media
+    path_prefixes:
+      - sources/
+    aliases: []
+    # Archived raw items (sources/.raw/) — provenance storage, not mined.
     extractable: false
     expert_routing: false
 

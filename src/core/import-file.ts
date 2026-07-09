@@ -205,6 +205,18 @@ export interface ImportResult {
   flagged?: boolean;
   /** Which flag tier fired, when `flagged`. */
   flag_reason?: 'markup_heavy' | 'oversized';
+  /**
+   * True when the update changed NOTHING but the frontmatter `tags` key —
+   * title, type, body (compiled_truth), timeline, and all other stable
+   * frontmatter are byte-identical to the existing row. Backfill/dream
+   * agents produce exactly this shape when appending idempotency tags to
+   * connector-owned inbox/* pages. The DB write proceeds (tags live in the
+   * tags table), but the put_page write-through uses this flag to SKIP
+   * re-materializing the .md file — a tag-only re-render into the
+   * brain-content checkout collides with the connector's own re-ingest
+   * rewrites of the same files (the recurring git-conflict class).
+   */
+  tagOnlyChange?: boolean;
 }
 
 const MAX_FILE_SIZE = 5_000_000; // 5MB
@@ -592,6 +604,32 @@ export async function importFromContent(
     return { slug, status: 'skipped', chunks: 0, parsedPage };
   }
 
+  // Tag-only change detection (write-through skip). The hash above covers
+  // tags, so a backfill/dream agent appending an idempotency tag to a
+  // connector-owned page lands here as a "real" update — but if the title,
+  // type, body, timeline, and every other stable frontmatter key are
+  // identical to the existing row, the ONLY durable delta is the tags
+  // table. Flag it so the put_page write-through skips re-rendering the
+  // .md file (which collides with connector re-ingest rewrites of the same
+  // file — the recurring git-conflict class). Ephemeral keys are excluded
+  // exactly as in the hash; `tags` is already promoted out of frontmatter
+  // by parseMarkdownPage on the incoming side and by import on the stored
+  // side, but strip both defensively.
+  let tagOnlyChange = false;
+  if (existing && !opts.forceRechunk) {
+    const stableExisting: Record<string, unknown> = { ...(existing.frontmatter ?? {}) };
+    for (const k of HASH_EPHEMERAL_FRONTMATTER_KEYS) delete stableExisting[k];
+    delete stableExisting.tags;
+    const stableIncoming: Record<string, unknown> = { ...stableFrontmatter };
+    delete stableIncoming.tags;
+    tagOnlyChange =
+      parsed.title === existing.title &&
+      parsed.type === existing.type &&
+      parsed.compiled_truth === existing.compiled_truth &&
+      (parsed.timeline || '') === (existing.timeline || '') &&
+      canonicalJson(stableIncoming) === canonicalJson(stableExisting);
+  }
+
   // v0.41.13 (#1309) — identity-based cross-slug dedup pre-check.
   //
   // Catches the overlapping-ingest-roots bug class: when a user runs
@@ -953,7 +991,20 @@ export async function importFromContent(
     parsedPage,
     ...(pageQuarantined ? { quarantined: true } : {}),
     ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}),
+    ...(tagOnlyChange ? { tagOnlyChange: true } : {}),
   };
+}
+
+/**
+ * Deterministic JSON (recursively sorted object keys) for structural
+ * frontmatter equality in the tag-only-change check. Key order from the
+ * YAML parse vs the DB jsonb round-trip is not stable; values are.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`).join(',')}}`;
 }
 
 /**
