@@ -16,7 +16,7 @@ import { expandQuery } from './search/expansion.ts';
 import { dedupResults } from './search/dedup.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
-import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef, type PackFrontmatterSource } from './link-extraction.ts';
+import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, normalizeBasename, SLUG_PATH_VALUE_RE, type UnresolvedFrontmatterRef, type PackFrontmatterSource } from './link-extraction.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
@@ -2186,16 +2186,93 @@ const add_timeline_entry: Operation = {
   cliHints: { name: 'timeline-add', positional: ['slug', 'date', 'summary'] },
 };
 
+/**
+ * Timeline rollup (B1): typed link types whose INCOMING edges contribute their
+ * page's timeline to an entity page's rolled-up view. A support case links
+ * `for_customer` → customers/x, so customers/x (which has no timeline_entries
+ * of its own) can union the case timelines. Closed list on purpose — rolling
+ * up ALL incoming edges (mentions, cites, ...) would turn any well-linked page
+ * into a firehose. Expert-routing surfaces that want a rollup later should
+ * reuse this op rather than re-deriving the join.
+ */
+const TIMELINE_ROLLUP_LINK_TYPES = ['for_customer', 'affects_product', 'works_on'];
+
+/** Hard cap on a rolled-up timeline (own + linked, after merge). */
+const TIMELINE_ROLLUP_CAP = 100;
+
 const get_timeline: Operation = {
   name: 'get_timeline',
-  description: 'Get timeline entries for a page',
+  description:
+    'Get timeline entries for a page. include_linked: additionally roll up timeline entries from pages ' +
+    'linking INTO this page via typed links (for_customer/affects_product/works_on) — e.g. a customer ' +
+    'entity page unions its support cases\' timelines. Rolled-up entries carry origin_slug; newest-first, ' +
+    `capped at ${TIMELINE_ROLLUP_CAP}.`,
   params: {
     slug: { type: 'string', required: true },
+    include_linked: { type: 'boolean', description: 'Union timeline entries of pages that link into this page via for_customer/affects_product/works_on' },
   },
   handler: async (ctx, p) => {
     // #2200: route through sourceScopeOpts so a federated grant reaches the
     // engine via TimelineOpts.sourceIds; scalar/unset unchanged.
-    return ctx.engine.getTimeline(p.slug as string, sourceScopeOpts(ctx));
+    const slug = p.slug as string;
+    const scope = sourceScopeOpts(ctx);
+    const own = await ctx.engine.getTimeline(slug, scope);
+    // Default behavior byte-identical: no flag → the plain engine read.
+    if (!p.include_linked) return own;
+
+    // B1 rollup: one SQL join via links (op-level so every caller — CLI, MCP,
+    // future expert-routing surfaces — gets the same semantics; NOT re-derived
+    // in callers). Source scope mirrors getTimeline precedence (sourceIds[] >
+    // sourceId > unscoped) and scopes BOTH endpoints so a federated grant
+    // can't surface a foreign linking page's entries (same D4A posture as
+    // get_links/get_backlinks).
+    const sources =
+      scope.sourceIds && scope.sourceIds.length > 0
+        ? scope.sourceIds
+        : scope.sourceId
+          ? [scope.sourceId]
+          : null;
+    const where: string[] = ['target.slug = $1', 'l.link_type = ANY($2::text[])', 'lp.deleted_at IS NULL'];
+    const params: unknown[] = [slug, TIMELINE_ROLLUP_LINK_TYPES];
+    if (sources) {
+      params.push(sources);
+      where.push(`target.source_id = ANY($${params.length}::text[])`);
+      where.push(`lp.source_id = ANY($${params.length}::text[])`);
+    }
+    params.push(TIMELINE_ROLLUP_CAP);
+    // DISTINCT ON (te.id): a linking page may carry more than one qualifying
+    // edge to the target (e.g. for_customer + works_on) — each entry must
+    // appear once. Inner ORDER BY pins the DISTINCT; outer orders the result.
+    const linked = await ctx.engine.executeRaw<{ id: number; date: string; origin_slug: string }>(
+      `SELECT * FROM (
+         SELECT DISTINCT ON (te.id)
+           te.id, te.page_id, te.date, te.source, te.summary, te.detail, te.created_at,
+           lp.slug AS origin_slug
+         FROM pages target
+         JOIN links l ON l.to_page_id = target.id
+         JOIN pages lp ON lp.id = l.from_page_id
+         JOIN timeline_entries te ON te.page_id = lp.id
+         WHERE ${where.join(' AND ')}
+         ORDER BY te.id
+       ) x
+       ORDER BY x.date DESC, x.id DESC
+       LIMIT $${params.length}`,
+      params,
+    );
+    // Merge: own entries annotated with their own slug (uniform shape), then
+    // linked; dedupe by entry id (self-link guard), newest-first, hard cap.
+    const seen = new Set<number>();
+    const merged = [
+      ...own.map(e => ({ ...e, origin_slug: slug })),
+      ...linked,
+    ].filter(e => {
+      if (seen.has(e.id)) return false;
+      seen.add(e.id);
+      return true;
+    });
+    merged.sort((a, b) =>
+      (new Date(b.date as unknown as string).getTime() - new Date(a.date as unknown as string).getTime()) || (b.id - a.id));
+    return merged.slice(0, TIMELINE_ROLLUP_CAP);
   },
   scope: 'read',
   cliHints: { name: 'timeline', positional: ['slug'] },
@@ -2627,6 +2704,82 @@ const resolve_slugs: Operation = {
     return ctx.engine.resolveSlugs(p.partial as string);
   },
   scope: 'read',
+};
+
+/**
+ * B2 — curated alias write surface. Registers alias → canonical in
+ * slug_aliases, the DURABLE table: page_aliases rows are replaced wholesale by
+ * the frontmatter `aliases:` projection on every re-import (setPageAliases
+ * delete+insert), so a curated alias written there would be silently wiped the
+ * next time the page syncs. slug_aliases has no bulk-replace path (only the
+ * unify-types minion appends to it) and the doctor's dangling_aliases check
+ * watches it.
+ *
+ * The alias value is slugified on store ("Hitachi ID Suite" →
+ * hitachi-id-suite) with the SAME normalizer makeResolver uses on the read
+ * side, so frontmatter link extraction resolves the alias exactly.
+ * Idempotent: re-adding the identical alias is a no-op; an alias already
+ * pointing at a DIFFERENT canonical is reported, never overwritten (delete
+ * the row deliberately if a remap is intended).
+ */
+const add_alias: Operation = {
+  name: 'add_alias',
+  description:
+    'Register a curated alias for a page (slug_aliases). Link extraction resolves the alias exactly — ' +
+    'precedence: exact slug > alias > fuzzy title. Alias text is slugified on store ' +
+    '("Hitachi ID Suite" → hitachi-id-suite). Idempotent; never remaps an existing alias.',
+  params: {
+    alias: { type: 'string', required: true, description: 'Alias text or slug (slugified on store)' },
+    canonical: { type: 'string', required: true, description: 'Canonical page slug the alias resolves to (must exist)' },
+    notes: { type: 'string', description: 'Why this alias exists (provenance)' },
+  },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, p) => {
+    const rawAlias = (p.alias as string).trim();
+    const canonical = (p.canonical as string).trim().toLowerCase();
+    // Same shape split as the resolver read side: slug-path values keep their
+    // path (lowercased); display names slugify.
+    const aliasSlug = SLUG_PATH_VALUE_RE.test(rawAlias) ? rawAlias.toLowerCase() : normalizeBasename(rawAlias);
+    if (!aliasSlug) {
+      throw new OperationError('invalid_params', `alias "${rawAlias}" normalizes to empty`);
+    }
+    if (aliasSlug === canonical) {
+      throw new OperationError('invalid_params', `alias "${aliasSlug}" equals its canonical slug (self-alias)`);
+    }
+    // Same slug-scope gate as the other write ops (fail-closed for subagents).
+    enforceSubagentWriteScope(ctx, canonical, 'add_alias');
+    // Engine convention: unset sourceId writes against 'default' — matches the
+    // resolver read side's unscoped fallback.
+    const sourceId = ctx.sourceId || 'default';
+    if (ctx.dryRun) return { dry_run: true, action: 'add_alias', alias: aliasSlug, canonical };
+    // The canonical must exist: a write surface must not mint the dangling
+    // aliases the doctor exists to flag.
+    const page = await ctx.engine.getPage(canonical, { sourceId });
+    if (!page) {
+      throw new OperationError('page_not_found', `canonical page "${canonical}" not found (source=${sourceId})`);
+    }
+    const existing = await ctx.engine.executeRaw<{ canonical_slug: string }>(
+      `SELECT canonical_slug FROM slug_aliases WHERE source_id = $1 AND alias_slug = $2`,
+      [sourceId, aliasSlug],
+    );
+    if (existing.length > 0) {
+      return {
+        status: existing[0].canonical_slug === canonical ? 'ok' : 'exists',
+        alias: aliasSlug,
+        canonical: existing[0].canonical_slug,
+        created: false,
+      };
+    }
+    await ctx.engine.executeRaw(
+      `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug, notes)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (source_id, alias_slug) DO NOTHING`,
+      [sourceId, aliasSlug, canonical, (p.notes as string) ?? null],
+    );
+    return { status: 'ok', alias: aliasSlug, canonical, created: true };
+  },
+  cliHints: { name: 'alias-add', positional: ['alias', 'canonical'] },
 };
 
 const get_chunks: Operation = {
@@ -5157,6 +5310,8 @@ export const operations: Operation[] = [
   put_raw_data, get_raw_data,
   // Resolution & chunks
   resolve_slugs, get_chunks,
+  // B2: curated alias write surface (slug_aliases; read side = makeResolver step 2.5)
+  add_alias,
   // Ingest log
   log_ingest, get_ingest_log,
   // Files
