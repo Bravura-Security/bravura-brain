@@ -596,3 +596,74 @@ describe('makeSubagentHandler default client construction', () => {
     expect(result.result).toBe('ok');
   });
 });
+
+// ── max_tokens truncation guard ─────────────────────────────
+//
+// Models with default-on adaptive thinking (bedrock claude-sonnet-5) can
+// burn the entire output budget inside a thinking block; the API truncates
+// at stop_reason='max_tokens' with a thinking-only content array. Pre-guard
+// the loop treated any no-tool_use turn as terminal end_turn and returned
+// an EMPTY result marked successful (prod jobs 6405/6408, 2026-07-06).
+
+describe('subagent handler max_tokens truncation guard', () => {
+  test('thinking-only max_tokens turn throws instead of returning empty success', async () => {
+    const client = new FakeMessagesClient([
+      {
+        content: [{ type: 'thinking', thinking: '', signature: 'sig' }] as any,
+        stop_reason: 'max_tokens' as any,
+      },
+    ]);
+    const handler = makeSubagentHandler({ engine, client, toolRegistry: [makeEchoTool()] });
+    const ctx = await makeCtx({ prompt: 'complex task' });
+
+    await expect(handler(ctx)).rejects.toThrow(/truncated at max_tokens/);
+
+    // The truncated assistant message must NOT be persisted — otherwise the
+    // resume reconciliation would treat the trailing no-tool_use assistant
+    // row as terminal and every retry would return the same empty success.
+    const msgs = await engine.executeRaw<{ count: string }>(
+      `SELECT count(*)::text AS count FROM subagent_messages WHERE job_id = $1 AND role = 'assistant'`,
+      [ctx.id],
+    );
+    expect(parseInt(msgs[0]!.count, 10)).toBe(0);
+  });
+
+  test('max_tokens stop WITH complete tool_use blocks continues the loop', async () => {
+    const client = new FakeMessagesClient([
+      {
+        content: [
+          { type: 'thinking', thinking: '', signature: 'sig' },
+          { type: 'tool_use', id: 'tu_trunc_1', name: 'echo', input: { value: 'a' } },
+        ] as any,
+        stop_reason: 'max_tokens' as any,
+      },
+      { content: [{ type: 'text', text: 'done' }] as any, stop_reason: 'end_turn' },
+    ]);
+    const handler = makeSubagentHandler({ engine, client, toolRegistry: [makeEchoTool()] });
+    const ctx = await makeCtx({ prompt: 'go' });
+
+    const result = await handler(ctx);
+
+    expect(result.result).toBe('done');
+    expect(result.stop_reason).toBe('end_turn');
+    expect(result.turns_count).toBe(2);
+  });
+
+  test('default max_tokens is 16384; data.max_tokens overrides per job', async () => {
+    const client = new FakeMessagesClient([
+      { content: [{ type: 'text', text: 'ok' }] as any, stop_reason: 'end_turn' },
+    ]);
+    const handler = makeSubagentHandler({ engine, client, toolRegistry: [] });
+    const ctx = await makeCtx({ prompt: 'hi' });
+    await handler(ctx);
+    expect(client.calls[0]!.max_tokens).toBe(16384);
+
+    const client2 = new FakeMessagesClient([
+      { content: [{ type: 'text', text: 'ok' }] as any, stop_reason: 'end_turn' },
+    ]);
+    const handler2 = makeSubagentHandler({ engine, client: client2, toolRegistry: [] });
+    const ctx2 = await makeCtx({ prompt: 'hi', max_tokens: 8192 });
+    await handler2(ctx2);
+    expect(client2.calls[0]!.max_tokens).toBe(8192);
+  });
+});
