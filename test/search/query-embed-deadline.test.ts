@@ -82,4 +82,44 @@ describe('embedQueryBounded — query-embed deadline', () => {
     expect(out).toBeInstanceOf(Float32Array);
     expect(out.length).toBe(1024);
   });
+
+  test('a DEAD shared signal does not strangle a healthy embed (expansion starvation regression)', async () => {
+    // The regression: LLM query expansion runs between deadline creation (at
+    // hybridSearchCached entry) and the variant embeds. A slow expansion model
+    // (>6s) left dl.signal ALREADY FIRED, so every embed's fetch started
+    // aborted → instant rejection → keyword-only fallback → `[]` for
+    // natural-language queries whenever expansion was ON. The floor promises
+    // each embed MIN_QUERY_EMBED_BUDGET_MS; the abort signal handed to the
+    // transport must be live for that same floored budget.
+    const vec = Array.from({ length: 1024 }, () => 0.1);
+    __setEmbedTransportForTests(async (args: any) => {
+      // Behave like a well-behaved fetch: an already-aborted signal rejects
+      // immediately (this is what the real transport does).
+      if (args.abortSignal?.aborted) {
+        throw new Error('aborted before dispatch');
+      }
+      return { embeddings: [vec], usage: { tokens: 1 } } as any;
+    });
+    // Simulate the post-expansion state: shared signal fired, deadline elapsed.
+    const fired = AbortSignal.abort();
+    const dl = { signal: fired, deadlineAt: Date.now() - 10_000 };
+    const out = await embedQueryBounded('q after slow expansion', undefined, dl);
+    expect(out).toBeInstanceOf(Float32Array);
+    expect(out.length).toBe(1024);
+  });
+
+  test('a nearly-dead shared deadline gets a live signal covering the floored budget', async () => {
+    const vec = Array.from({ length: 1024 }, () => 0.1);
+    let sawLiveSignal = false;
+    __setEmbedTransportForTests(async (args: any) => {
+      sawLiveSignal = args.abortSignal ? !args.abortSignal.aborted : true;
+      return { embeddings: [vec], usage: { tokens: 1 } } as any;
+    });
+    // Signal not yet fired but with ~50ms left — less than the 2s floor the
+    // race grants. The embed must get a signal that stays live for the floor.
+    const dl = { signal: AbortSignal.timeout(50), deadlineAt: Date.now() + 50 };
+    const out = await embedQueryBounded('q', undefined, dl);
+    expect(out.length).toBe(1024);
+    expect(sawLiveSignal).toBe(true);
+  });
 });
