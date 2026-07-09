@@ -54,6 +54,7 @@ import type {
 import { GBrainError, PAGE_SORT_SQL, ENRICH_ORDER_SQL } from './types.ts';
 import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
 import * as db from './db.ts';
+import { maybeApplyIamAuth } from './rds-iam-auth.ts';
 import { ConnectionManager } from './connection-manager.ts';
 import { logConnectionEvent } from './connection-audit.ts';
 import { validateSlug, contentHash, rowToPage, rowToStalePage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding, takeRowToTake, isUndefinedTableError, warnOncePerProcess } from './utils.ts';
@@ -194,7 +195,8 @@ export class PostgresEngine implements BrainEngine {
       if (typeof prepare === 'boolean') {
         opts.prepare = prepare;
       }
-      this._sql = postgres(url, opts);
+      // RDS IAM auth (GBRAIN_DB_IAM_AUTH=1): async token pass + TLS; no-op when off.
+      this._sql = postgres(maybeApplyIamAuth(url, opts), opts);
       await this._sql`SELECT 1`;
       await db.setSessionDefaults(this._sql);
       this._connectionStyle = 'instance';

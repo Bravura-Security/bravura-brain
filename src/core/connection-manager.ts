@@ -38,6 +38,7 @@
 
 import postgres from 'postgres';
 import { resolvePrepare, resolveSessionTimeouts, resolvePoolSize, endPoolBounded } from './db.ts';
+import { maybeApplyIamAuth } from './rds-iam-auth.ts';
 import { redactPgUrl } from './url-redact.ts';
 import { logConnectionEvent } from './connection-audit.ts';
 
@@ -262,7 +263,8 @@ export class ConnectionManager {
     if (Object.keys(timeouts).length > 0) opts.connection = timeouts;
     const prepare = resolvePrepare(this.opts.url);
     if (typeof prepare === 'boolean') opts.prepare = prepare;
-    this._readPool = postgres(this.opts.url, opts);
+    // RDS IAM auth (GBRAIN_DB_IAM_AUTH=1): async token pass + TLS; no-op when off.
+    this._readPool = postgres(maybeApplyIamAuth(this.opts.url, opts), opts);
     logConnectionEvent({ pool: 'read', op: 'init' });
     return this._readPool;
   }
@@ -351,7 +353,8 @@ export class ConnectionManager {
     };
     const t0 = Date.now();
     try {
-      const pool = postgres(this._directUrl, opts);
+      // RDS IAM auth (GBRAIN_DB_IAM_AUTH=1): async token pass + TLS; no-op when off.
+      const pool = postgres(maybeApplyIamAuth(this._directUrl, opts), opts);
       // Probe to validate connectivity early.
       await pool`SELECT 1`;
       logConnectionEvent({

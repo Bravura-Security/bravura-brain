@@ -106,6 +106,7 @@
     "@aws-crypto/sha256-js": "5.2.0",
     "@aws-sdk/client-s3": "^3.1028.0",
     "@aws-sdk/credential-provider-node": "3.972.30",
+    "@aws-sdk/rds-signer": "^3.1083.0",
     "@dqbd/tiktoken": "^1.0.22",
     "@electric-sql/pglite": "0.4.3",
     "@jsquash/avif": "^2.1.1",
