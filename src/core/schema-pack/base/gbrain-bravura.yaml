@@ -21,7 +21,7 @@
 
 api_version: gbrain-schema-pack-v1
 name: gbrain-bravura
-version: 1.5.0
+version: 1.5.1
 gbrain_min_version: 0.39.0
 extends: gbrain-recommended
 description: "Bravura Security unified company brain. Spans support (cases, patterns, KB), internal knowledge (concepts, processes, products, people, teams), and sales (deals live via Salesforce opportunities; RFPs stubbed). Two-layer compiled-truth pages authored by the nightly enrich agent from raw inbox signals; reference content (Paligo / Confluence-KB / SF-KB / Responsive / opportunities) ingested DB-direct."
@@ -61,6 +61,24 @@ page_types:
     aliases: []
     extractable: false
     # Teams are an expertise locus (who owns which product/process).
+    expert_routing: true
+
+  # v1.5.1: person MUST be declared here, not "inherited". Extends-chain
+  # resolution does NOT merge parent page_types (ResolvedPack.manifest is
+  # the child manifest only, and gbrain-recommended declares zero types),
+  # so while this pack was active, inferTypeFromPack fell through every
+  # declared prefix for people/* paths and stored them as the default
+  # 'concept'. That broke BOTH the person-scoped works_on/member_of
+  # frontmatter_links rules (page_type never matched → zero edges from 21
+  # live pages carrying works_on) AND find_experts (person absent from
+  # expert_routing → people never ranked). Mirrors gbrain-base's person.
+  - name: person
+    primitive: entity
+    path_prefixes:
+      - people/
+    aliases: []
+    extractable: false
+    # People are the primary expertise locus for find_experts / whoknows.
     expert_routing: true
 
   # ---- Internal knowledge ----
