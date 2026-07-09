@@ -68,6 +68,7 @@ SUBMITTING
     --subagent-def <name>        Named plugin subagent (from GBRAIN_PLUGIN_PATH)
     --model <id>                 Anthropic model id (defaults to sonnet)
     --max-turns <n>              Max assistant turns (default 20)
+    --max-tokens <n>             Per-turn output-token cap (default 16384)
     --tools a,b,c                Subset of registered tool names (comma list)
     --timeout-ms <n>             Per-job wall-clock timeout
     --source <id>                Target source for the agent's writes (else host 'default')
@@ -102,6 +103,7 @@ interface RunFlags {
   subagentDef?: string;
   model?: string;
   maxTurns?: number;
+  maxTokens?: number;
   tools?: string[];
   timeoutMs?: number;
   fanoutManifest?: string;
@@ -179,6 +181,7 @@ function parseRunFlags(args: string[]): { flags: RunFlags; rest: string[] } {
       case '--subagent-def':    flags.subagentDef = requireFlagValue(args, ++i, a); break;
       case '--model':           flags.model = requireFlagValue(args, ++i, a); break;
       case '--max-turns':       flags.maxTurns = parseIntFlagValue(requireFlagValue(args, ++i, a), a); break;
+      case '--max-tokens':      flags.maxTokens = parseIntFlagValue(requireFlagValue(args, ++i, a), a); break;
       case '--tools':           flags.tools = requireFlagValue(args, ++i, a).split(',').map(s => s.trim()).filter(Boolean); break;
       case '--timeout-ms':      flags.timeoutMs = parseIntFlagValue(requireFlagValue(args, ++i, a), a); break;
       case '--fanout-manifest': flags.fanoutManifest = requireFlagValue(args, ++i, a); break;
@@ -230,6 +233,7 @@ export async function runAgentRun(engine: BrainEngine, args: string[]): Promise<
   if (flags.subagentDef) data.subagent_def = flags.subagentDef;
   if (flags.model) data.model = flags.model;
   if (flags.maxTurns) data.max_turns = flags.maxTurns;
+  if (flags.maxTokens) data.max_tokens = flags.maxTokens;
   if (flags.tools && flags.tools.length > 0) data.allowed_tools = flags.tools;
   if (flags.source) data.source_id = flags.source;
   if (flags.allowedSlugPrefixes && flags.allowedSlugPrefixes.length > 0) data.allowed_slug_prefixes = flags.allowedSlugPrefixes;
@@ -282,6 +286,7 @@ async function runFanout(engine: BrainEngine, queue: MinionQueue, flags: RunFlag
       ...(flags.subagentDef ? { subagent_def: flags.subagentDef } : {}),
       ...(flags.model ? { model: flags.model } : {}),
       ...(flags.maxTurns ? { max_turns: flags.maxTurns } : {}),
+      ...(flags.maxTokens ? { max_tokens: flags.maxTokens } : {}),
       ...(flags.tools && flags.tools.length > 0 ? { allowed_tools: flags.tools } : {}),
       ...(flags.source ? { source_id: flags.source } : {}),
       ...(flags.allowedSlugPrefixes && flags.allowedSlugPrefixes.length > 0 ? { allowed_slug_prefixes: flags.allowedSlugPrefixes } : {}),
@@ -316,6 +321,7 @@ async function runFanout(engine: BrainEngine, queue: MinionQueue, flags: RunFlag
       ...(flags.subagentDef ? { subagent_def: flags.subagentDef } : {}),
       ...(flags.model ? { model: flags.model } : {}),
       ...(flags.maxTurns ? { max_turns: flags.maxTurns } : {}),
+      ...(flags.maxTokens ? { max_tokens: flags.maxTokens } : {}),
       ...(flags.tools && flags.tools.length > 0 ? { allowed_tools: flags.tools } : {}),
       ...(flags.source ? { source_id: flags.source } : {}),
       ...(flags.allowedSlugPrefixes && flags.allowedSlugPrefixes.length > 0 ? { allowed_slug_prefixes: flags.allowedSlugPrefixes } : {}),

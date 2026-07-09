@@ -412,6 +412,14 @@ export interface SubagentHandlerData {
   /** Max assistant turns before the loop fails with stop_reason='max_turns'. */
   max_turns?: number;
   /**
+   * Per-turn output-token cap (Anthropic `max_tokens`). Defaults to 16384
+   * on the native path. Models with default-on adaptive thinking (e.g.
+   * bedrock claude-sonnet-5) need headroom for thinking + tool calls in a
+   * single turn — at the old 4096 cap complex prompts truncated inside the
+   * thinking block and the job returned empty (v0.42, jobs 6405/6408).
+   */
+  max_tokens?: number;
+  /**
    * Whitelist of tool names the agent may call. MUST be a subset of the
    * derived registry names — invalid entries are rejected at tool-dispatch
    * time, not silently ignored. Empty array = no tools.

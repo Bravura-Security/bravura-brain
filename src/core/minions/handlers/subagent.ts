@@ -18,7 +18,10 @@
  *   - token rollup via ctx.updateTokens per turn.
  *
  * NOT in v0.15: refusal detection, stop_reason=max_tokens partial
- * recovery, parallel tool-use dispatch (runs tools sequentially; the
+ * recovery (a truncated no-tool_use turn now FAILS LOUDLY instead of
+ * silently returning empty — see the truncation guard in the main loop —
+ * but there is still no continuation/recovery), parallel tool-use
+ * dispatch (runs tools sequentially; the
  * Messages API allows parallel tool_use blocks and the replay tolerates
  * them, but v1 dispatches serially for simplicity). All three are tracked
  * as P2 items in the plan file.
@@ -60,6 +63,20 @@ import { randomUUIDv7 } from 'bun';
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_MAX_TURNS = 20;
+/**
+ * Per-turn output-token cap (Anthropic `max_tokens`) for the native path.
+ *
+ * Was hardcoded 4096 through v0.42. Models with adaptive thinking on by
+ * default (observed: bedrock:global.anthropic.claude-sonnet-5) can burn the
+ * ENTIRE output budget inside a single thinking block on complex prompts;
+ * the API then truncates at stop_reason='max_tokens' with a thinking-only
+ * content array — no tool_use, no text — and the loop misread that as a
+ * successful end_turn with an empty result (jobs 6405/6408, 2026-07-06,
+ * out=4096 exactly). 16384 leaves room for thinking + tool calls while
+ * staying under the SDK's ~10-minute non-streaming request ceiling.
+ * Override per job with data.max_tokens (`gbrain agent run --max-tokens N`).
+ */
+const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 const DEFAULT_RATE_KEY = 'anthropic:messages';
 
 /**
@@ -223,6 +240,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         fallback: TIER_DEFAULTS.subagent,
       });
     const maxTurns = data.max_turns ?? DEFAULT_MAX_TURNS;
+    const maxOutputTokens = data.max_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     // v0.41 Approach C: systemPrompt is now built AFTER toolDefs (a few
     // lines below) so the renderer can splice a tool-usage preamble
     // listing each available tool's usage_hint. The renderer is
@@ -516,7 +534,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
           // `model` stays qualified everywhere else (persistence, recipe
           // lookup at recipeIdFromModel(), capability gate).
           model: stripProviderPrefix(model),
-          max_tokens: 4096,
+          max_tokens: maxOutputTokens,
           system: [
             { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
           ] as any,
@@ -586,6 +604,26 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       });
 
       const blocks = assistantMsg.content as ContentBlock[];
+
+      // Truncation guard: stop_reason='max_tokens' with zero tool_use means
+      // the turn was cut off before the model could act. With default-on
+      // adaptive thinking (claude-sonnet-5) the whole output budget can go
+      // to a thinking block, leaving no text/tool_use at all. Fail loudly
+      // BEFORE persisting: (a) step 4's "no tool_use ⇒ end_turn" would
+      // otherwise return an EMPTY result marked successful; (b) once the
+      // truncated assistant row is persisted, the resume reconciliation
+      // above treats a trailing no-tool_use assistant message as terminal,
+      // so every retry would short-circuit to the same empty success.
+      // A max_tokens stop WITH tool_use blocks is fine — the API only emits
+      // fully-formed blocks, so we dispatch them and the loop continues.
+      if (assistantMsg.stop_reason === 'max_tokens' && !blocks.some(b => b.type === 'tool_use')) {
+        throw new Error(
+          `subagent turn ${turnIdx} truncated at max_tokens=${maxOutputTokens} with no tool_use ` +
+          `(model=${model}, output_tokens=${outTokens}, blocks=[${blocks.map(b => b.type).join(',')}]). ` +
+          `The model likely spent the whole output budget on thinking. ` +
+          `Raise the cap (gbrain agent run --max-tokens N) or simplify the prompt.`,
+        );
+      }
 
       // 3. Persist the assistant message BEFORE tool dispatch so replay
       //    sees a consistent state.
@@ -863,6 +901,10 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
     tools: chatTools,
     toolHandlers,
     maxTurns,
+    // Per-job output cap override only; the gateway keeps its own default
+    // (4096) because non-Anthropic providers on this path have varying
+    // per-model output ceilings.
+    ...(typeof data.max_tokens === 'number' ? { maxTokens: data.max_tokens } : {}),
     abortSignal: ctx.signal,
     cacheSystem,
     // ALWAYS pass replayState (even on fresh runs) so the gateway loop's
