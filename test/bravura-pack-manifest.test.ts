@@ -10,6 +10,12 @@ import {
   parseYamlMini,
   type SchemaPackManifest,
 } from '../src/core/schema-pack/index.ts';
+import { inferTypeFromPack } from '../src/core/markdown.ts';
+import {
+  extractFrontmatterLinks,
+  SLUG_PATH_VALUE_RE,
+  type SlugResolver,
+} from '../src/core/link-extraction.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const baseDir = join(here, '..', 'src', 'core', 'schema-pack', 'base');
@@ -39,6 +45,7 @@ describe('gbrain-bravura company-brain pack', () => {
       'inbox',
       'kb_article',
       'knowledge_article',
+      'person', // v1.5.1 — must be declared locally; extends does not merge parent page_types
       'process',
       'product_area',
       'responsive_qa',
@@ -156,6 +163,68 @@ describe('gbrain-bravura company-brain pack', () => {
     expect(byField('support_case', 'account')?.link_type).toBe('for_customer');
     expect(byField('support_case', 'affects_product')?.link_type).toBe('affects_product');
     expect(byField('support_pattern', 'affects_product')?.link_type).toBe('affects_product');
+  });
+
+  // v1.5.1 regression — the live zero-works_on-edges bug (2026-07-09).
+  //
+  // gbrain-bravura's frontmatter_links declare `page_type: person →
+  // works_on`, and its comments claim person is "inherited from the
+  // extends chain" — but extends-chain resolution does NOT merge parent
+  // page_types (ResolvedPack.manifest is the child manifest only), and
+  // gbrain-recommended declares ZERO page_types anyway. Consequence:
+  // `inferTypeFromPack('people/…', pack)` fell through every declared
+  // prefix and returned the default 'concept', so put_page stored
+  // people/* pages as type=concept and the person-scoped works_on rule
+  // never fired — 21 live pages carrying `works_on: [products/…]`
+  // produced ZERO edges. person was also absent from expert_routing, so
+  // find_experts never ranked people. The pack must declare person itself.
+  test('v1.5.1: person page type is declared — people/ prefix, expert routing', () => {
+    const person = pack.page_types.find((t) => t.name === 'person');
+    expect(person).toBeDefined();
+    expect(person!.primitive).toBe('entity');
+    expect(person!.path_prefixes).toContain('people/');
+    expect(person!.expert_routing).toBe(true);
+  });
+
+  test('v1.5.1: people/* paths infer type person under the active pack (not concept)', () => {
+    // Exact live shape: people/matt-vasich written via put_page while
+    // gbrain-bravura is active. Pre-fix this returned 'concept'.
+    expect(inferTypeFromPack('people/matt-vasich', pack)).toBe('person');
+    expect(inferTypeFromPack('people/matt-vasich.md', pack)).toBe('person');
+  });
+
+  test('v1.5.1: works_on array of slug-form refs on a pack-typed person page emits one edge per product', async () => {
+    // End-to-end shape of the live bug: page type comes from
+    // inferTypeFromPack (as put_page does), frontmatter carries an ARRAY
+    // of slug-form product refs, and the pack's person→works_on rule must
+    // produce one frontmatter edge per element. Pre-fix: inferTypeFromPack
+    // said 'concept', the person-scoped rule was skipped, zero candidates.
+    const known = new Set(['products/bravura-safe', 'products/bravura-pass']);
+    const resolver: SlugResolver = {
+      async resolve(name: string) {
+        if (SLUG_PATH_VALUE_RE.test(name)) return known.has(name.toLowerCase()) ? name.toLowerCase() : null;
+        return null;
+      },
+    };
+    const pageType = inferTypeFromPack('people/matt-vasich', pack);
+    const { candidates, unresolved } = await extractFrontmatterLinks(
+      'people/matt-vasich', pageType,
+      { source: 'company', works_on: ['products/bravura-safe', 'products/bravura-pass'] },
+      resolver, pack,
+    );
+    expect(unresolved).toEqual([]);
+    expect(candidates).toHaveLength(2);
+    const targets = candidates.map((c) => c.targetSlug).sort();
+    expect(targets).toEqual(['products/bravura-pass', 'products/bravura-safe']);
+    for (const c of candidates) {
+      expect(c).toMatchObject({
+        fromSlug: 'people/matt-vasich',
+        linkType: 'works_on',
+        linkSource: 'frontmatter',
+        originSlug: 'people/matt-vasich',
+        originField: 'works_on',
+      });
+    }
   });
 
   test('filing rules cover every authored type', () => {
