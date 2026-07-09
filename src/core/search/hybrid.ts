@@ -776,11 +776,27 @@ export async function embedQueryBounded(
   embedOpts: { embeddingModel?: string; dimensions?: number } | undefined,
   dl: QueryEmbedDeadline,
 ): Promise<Float32Array> {
-  const p = embedQuery(text, { ...(embedOpts ?? {}), abortSignal: dl.signal });
-  p.catch(() => { /* swallow the loser's late rejection */ });
   // Floor the budget so a healthy embed isn't starved when the shared absolute
   // deadline was mostly consumed by prior work (codex). Still bounded overall.
-  const remaining = Math.max(MIN_QUERY_EMBED_BUDGET_MS, dl.deadlineAt - Date.now());
+  const actualRemaining = dl.deadlineAt - Date.now();
+  const remaining = Math.max(MIN_QUERY_EMBED_BUDGET_MS, actualRemaining);
+  // The shared signal can be dead (or nearly dead) by the time this embed
+  // starts: LLM query expansion runs BETWEEN deadline creation (at
+  // hybridSearchCached entry) and the variant embeds, and a slow expansion
+  // model burns the whole budget. Pre-fix, every embed then started with an
+  // already-fired AbortSignal → instant rejection → keyword-only fallback →
+  // `[]` for natural-language queries whenever expansion was ON, while
+  // expand:false worked fine. The race floor below already promises each
+  // embed MIN_QUERY_EMBED_BUDGET_MS; the abort signal must cover that same
+  // floored budget or the floor is a promise the aborted socket can't keep.
+  // Stalled-provider worst case is unchanged: every embed still rejects
+  // within its floored budget via the Promise.race deadline.
+  const signal =
+    dl.signal.aborted || actualRemaining < MIN_QUERY_EMBED_BUDGET_MS
+      ? AbortSignal.timeout(remaining)
+      : dl.signal;
+  const p = embedQuery(text, { ...(embedOpts ?? {}), abortSignal: signal });
+  p.catch(() => { /* swallow the loser's late rejection */ });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(

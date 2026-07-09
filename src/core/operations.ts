@@ -3949,7 +3949,7 @@ const extract_facts: Operation = {
 const recall: Operation = {
   name: 'recall',
   description:
-    'v0.31: query per-source hot memory (facts table). Filters by entity / since / session. Remote callers see only visibility=world facts. Returns most-recent first. v0.32 adds optional include_pending to return pending_consolidation_count alongside facts in one round trip.',
+    'v0.31: query per-source hot memory (facts table). Filters by entity / since / session. Remote callers see only visibility=world facts. Returns most-recent first. v0.32 adds optional include_pending to return pending_consolidation_count alongside facts in one round trip. Spans the caller\'s federated read grant (allowedSources) like every other read op; granted-but-missing sources are skipped with a warning.',
   params: {
     entity: { type: 'string', description: 'Entity slug (canonical). Returns facts about this entity newest first.' },
     since: { type: 'string', description: 'ISO datetime or duration shorthand (e.g. "8 hours ago"). Returns facts created since.' },
@@ -3962,10 +3962,44 @@ const recall: Operation = {
   },
   scope: 'read',
   handler: async (ctx, p) => {
-    const sourceId = ctx.sourceId ?? 'default';
     const limit = typeof p.limit === 'number' ? p.limit : 50;
     const includeExpired = p.include_expired === true;
     const grep = typeof p.grep === 'string' ? p.grep.toLowerCase() : null;
+
+    // Source scope: span the caller's FULL federated read grant, not just the
+    // scalar write source. Pre-fix, recall read only `ctx.sourceId ?? 'default'`
+    // — for a remote MCP caller that scalar is their WRITE source (e.g. the CF
+    // Access personal source), so facts living in a granted READ source
+    // (company) were invisible: {facts: [], total: 0} while query/search
+    // (which route through sourceScopeOpts) worked fine. Same precedence
+    // ladder as every other read op: federated array > scalar > default.
+    const scope = sourceScopeOpts(ctx);
+    let sourceIds = scope.sourceIds ?? [scope.sourceId ?? 'default'];
+
+    // A grant can reference a source that no longer exists (stale
+    // GBRAIN_CF_ACCESS_DEFAULT_READ / client federated_read after a source
+    // hard-delete). Skip-and-warn — a stale grant entry must degrade to a
+    // no-op for that id, never fail the whole recall.
+    if (sourceIds.length > 1) {
+      try {
+        const existing = await ctx.engine.executeRaw<{ id: string }>(
+          `SELECT id FROM sources WHERE id = ANY($1::text[])`,
+          [sourceIds],
+        );
+        const existingIds = new Set(existing.map(r => r.id));
+        const missing = sourceIds.filter(id => !existingIds.has(id));
+        if (missing.length > 0) {
+          process.stderr.write(
+            `[recall] skipping granted-but-missing source(s): ${missing.join(', ')}\n`,
+          );
+          const present = sourceIds.filter(id => existingIds.has(id));
+          if (present.length > 0) sourceIds = present;
+        }
+      } catch {
+        // Best-effort filter: on probe failure query the full grant — a
+        // missing source yields zero rows at SQL level anyway.
+      }
+    }
 
     // Visibility filter: remote callers see world-only unless their token
     // grants elevated visibility (future-proofing; v0.31 ships world-only
@@ -3975,41 +4009,56 @@ const recall: Operation = {
         ? undefined
         : ['world'] as ('private' | 'world')[];
 
-    let rows: Awaited<ReturnType<typeof ctx.engine.listFactsByEntity>> = [];
-
-    if (p.supersessions === true) {
-      const since = parseSinceParam(p.since);
-      rows = await ctx.engine.listSupersessions(sourceId, { since: since ?? undefined, limit });
-    } else if (typeof p.entity === 'string' && p.entity.length > 0) {
-      const { resolveEntitySlug } = await import('./entities/resolve.ts');
-      const slug = (await resolveEntitySlug(ctx.engine, sourceId, p.entity)) ?? p.entity;
-      rows = await ctx.engine.listFactsByEntity(sourceId, slug, {
-        activeOnly: !includeExpired,
-        limit,
-        visibility,
-      });
-    } else if (typeof p.session_id === 'string' && p.session_id.length > 0) {
-      rows = await ctx.engine.listFactsBySession(sourceId, p.session_id, {
-        activeOnly: !includeExpired,
-        limit,
-        visibility,
-      });
-    } else if (p.since !== undefined) {
-      const since = parseSinceParam(p.since);
-      if (since) {
-        rows = await ctx.engine.listFactsSince(sourceId, since, {
+    // Per-source fetch (engine fact APIs are scalar-scoped by design); the
+    // grant is small (personal + a handful of shared domains), so a fan-out
+    // + merge keeps the engine contract unchanged.
+    const fetchForSource = async (
+      sourceId: string,
+    ): Promise<Awaited<ReturnType<typeof ctx.engine.listFactsByEntity>>> => {
+      if (p.supersessions === true) {
+        const since = parseSinceParam(p.since);
+        return ctx.engine.listSupersessions(sourceId, { since: since ?? undefined, limit });
+      }
+      if (typeof p.entity === 'string' && p.entity.length > 0) {
+        const { resolveEntitySlug } = await import('./entities/resolve.ts');
+        const slug = (await resolveEntitySlug(ctx.engine, sourceId, p.entity as string)) ?? (p.entity as string);
+        return ctx.engine.listFactsByEntity(sourceId, slug, {
           activeOnly: !includeExpired,
           limit,
           visibility,
         });
       }
-    } else {
+      if (typeof p.session_id === 'string' && p.session_id.length > 0) {
+        return ctx.engine.listFactsBySession(sourceId, p.session_id, {
+          activeOnly: !includeExpired,
+          limit,
+          visibility,
+        });
+      }
+      if (p.since !== undefined) {
+        const since = parseSinceParam(p.since);
+        if (!since) return [];
+        return ctx.engine.listFactsSince(sourceId, since, {
+          activeOnly: !includeExpired,
+          limit,
+          visibility,
+        });
+      }
       // No filter: return recent across the source.
-      rows = await ctx.engine.listFactsSince(sourceId, new Date(0), {
+      return ctx.engine.listFactsSince(sourceId, new Date(0), {
         activeOnly: !includeExpired,
         limit,
         visibility,
       });
+    };
+
+    const rowLists = await Promise.all(sourceIds.map(fetchForSource));
+    let rows = rowLists.flat();
+    if (sourceIds.length > 1) {
+      // Merge federated lists: newest first (matches each engine list's
+      // per-source ordering), re-capped at the caller's limit.
+      rows.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+      rows = rows.slice(0, limit);
     }
 
     if (grep) rows = rows.filter(r => r.fact.toLowerCase().includes(grep));
@@ -4020,7 +4069,11 @@ const recall: Operation = {
     let pending_consolidation_count: number | undefined;
     if (p.include_pending === true) {
       try {
-        pending_consolidation_count = await ctx.engine.countUnconsolidatedFacts(sourceId);
+        // Federated grant: sum the pending count across every source in scope.
+        const counts = await Promise.all(
+          sourceIds.map(sid => ctx.engine.countUnconsolidatedFacts(sid)),
+        );
+        pending_consolidation_count = counts.reduce((a, b) => a + b, 0);
       } catch (e) {
         // Best-effort: if the count query fails we still return facts. Field
         // stays undefined so callers can tell the difference between "0
@@ -4034,6 +4087,9 @@ const recall: Operation = {
     return {
       facts: rows.map(r => ({
         id: r.id,
+        // Federated recall spans the caller's read grant; attribute each fact
+        // to its source so multi-source rows stay distinguishable (additive).
+        source_id: r.source_id,
         fact: r.fact,
         kind: r.kind,
         entity_slug: r.entity_slug,
