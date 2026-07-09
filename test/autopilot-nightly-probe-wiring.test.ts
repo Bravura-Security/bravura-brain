@@ -72,4 +72,17 @@ describe('autopilot wiring: nightly quality probe', () => {
   test('max_usd default = 5 when config unset (matches plan default per D10)', () => {
     expect(SOURCE).toMatch(/max_usd\s*\?\?\s*5/);
   });
+
+  test('max_usd reads the DB config plane first (engine.getConfig), file plane as fallback', () => {
+    // Config-plane fix: `gbrain config set autopilot.nightly_quality_probe.max_usd`
+    // writes the DB plane, but the wiring previously read ONLY the file plane
+    // (loadConfig → cfg) so DB sets were silently ignored. Pin: the wiring
+    // must query the DB key via engine.getConfig (same plane as
+    // autopilot.auto_drain.max_usd_per_day) AND keep the file-plane
+    // expression as the fallback.
+    expect(SOURCE).toContain(`engine.getConfig('autopilot.nightly_quality_probe.max_usd')`);
+    // Fallback order pinned structurally: DB value validated (finite, >= 0)
+    // before the cfg-file expression is consulted.
+    expect(SOURCE).toMatch(/Number\.isFinite\(dbMaxUsd\)[\s\S]{0,120}nightly_quality_probe\?\.max_usd\s*\?\?\s*5/);
+  });
 });

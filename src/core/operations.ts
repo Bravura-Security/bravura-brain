@@ -929,7 +929,19 @@ const put_page: Operation = {
     let writeThrough: { written: boolean; path?: string; skipped?: string; error?: string } | undefined;
     const isSandboxSubagent = ctx.viaSubagent === true
       && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
-    if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
+    if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent && result.tagOnlyChange === true) {
+      // Tag-only skip: importFromContent verified the update changed
+      // NOTHING but the frontmatter `tags` key (title/type/body/timeline +
+      // all other stable frontmatter identical to the existing row). The
+      // DB write already carried the delta — tags live in the tags table —
+      // so re-rendering the .md would only churn the file (fresh
+      // ingested_at + tag line) and collide with connector re-ingest
+      // rewrites of the same file in the brain-content checkout (the
+      // recurring git-conflict class from backfill/dream idempotency-tag
+      // appends on connector-owned inbox/* pages).
+      ctx.logger.info(`[write-through] skip tag_only_change: ${result.slug} — only frontmatter tags changed; file left untouched`);
+      writeThrough = { written: false, skipped: 'tag_only_change' };
+    } else if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
       const sourceId = ctx.sourceId ?? 'default';
       const provenanceVia = ctx.remote === false ? 'put_page' : 'mcp:put_page';
       // Shared canonical write-through (also used by `gbrain brainstorm/lsd
