@@ -149,13 +149,42 @@ export async function getIamAuthToken(
   return token;
 }
 
-/** True when the URL itself already pins an ssl/sslmode choice. */
+/**
+ * True when the URL itself already pins an ssl/sslmode choice via query
+ * params. Used to detect caller intent so we can still strip sslmode from
+ * the URL when taking over ssl via opts (avoids double-ssl conflicts).
+ */
 function urlSpecifiesSsl(url: string): boolean {
   try {
     const parsed = new URL(url.replace(/^postgres(ql)?:\/\//, 'http://'));
     return parsed.searchParams.has('sslmode') || parsed.searchParams.has('ssl');
   } catch {
     return false;
+  }
+}
+
+/**
+ * Strip ?sslmode= / ?ssl= from the URL query string. When IAM auth is
+ * enabled we set opts.ssl explicitly, so leaving sslmode in the URL creates
+ * a double-ssl negotiation that postgres.js resolves non-deterministically
+ * (observed: host/port become "undefined:undefined" on the passwordless +
+ * query-string form because postgres.js's parseUrl replaces the extracted
+ * host segment and ?sslmode conflicts with the replaced URL). Removing it
+ * from the URL lets opts.ssl be the single ssl source of truth.
+ */
+function stripSslmodeFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url.replace(/^postgres(ql)?:\/\//, 'http://'));
+    if (!parsed.searchParams.has('sslmode') && !parsed.searchParams.has('ssl')) return url;
+    parsed.searchParams.delete('sslmode');
+    parsed.searchParams.delete('ssl');
+    // Re-assemble: restore original scheme, preserve everything else.
+    const scheme = url.match(/^(postgres(?:ql)?:\/\/)/i)?.[1] ?? 'postgres://';
+    const rest = parsed.href.slice('http://'.length);
+    // Remove trailing '?' if no params remain.
+    return scheme + rest.replace(/\?$/, '');
+  } catch {
+    return url;
   }
 }
 
@@ -167,9 +196,12 @@ function urlSpecifiesSsl(url: string): boolean {
  *   1. wires `opts.pass` to an async token provider (overrides any URL
  *      password — postgres.js option precedence: o.pass > url.password),
  *   2. defaults `opts.ssl = 'require'` (or a CA-verified tls object when
- *      GBRAIN_DB_SSL_CA_FILE is set) unless the caller/URL already chose,
- *   3. returns the URL with the password component stripped, so the dead
- *      password can't leak via URL-logging paths.
+ *      GBRAIN_DB_SSL_CA_FILE is set) unless the caller's opts.ssl already
+ *      has an explicit value — caller-provided opts.ssl wins, but URL-level
+ *      ?sslmode= does NOT (it conflicts with opts.pass on the passwordless
+ *      + query-string form and is stripped from the returned URL),
+ *   3. returns the URL with password component stripped + any ?sslmode=/
+ *      ?ssl= removed, so opts.ssl is the single ssl source of truth.
  *
  * Mutates `opts` in place (matches how the four construction sites build
  * their opts objects incrementally).
@@ -184,7 +216,10 @@ export function maybeApplyIamAuth(
   const endpoint = parsePgEndpoint(url);
   opts.pass = () => getIamAuthToken(endpoint, { env });
 
-  if (opts.ssl === undefined && !urlSpecifiesSsl(url)) {
+  // opts.ssl explicitly provided by the caller wins; URL-level ?sslmode=
+  // does NOT (it conflicts with the pass callback on the passwordless +
+  // query-string URL form and is stripped below in all cases).
+  if (opts.ssl === undefined) {
     const caFile = env.GBRAIN_DB_SSL_CA_FILE;
     if (caFile) {
       // Read once at pool construction. Sync on purpose: all four call
@@ -195,5 +230,9 @@ export function maybeApplyIamAuth(
     }
   }
 
-  return stripUrlPassword(url);
+  // Strip password + any URL-level sslmode params. The sslmode strip covers
+  // all 4 combinations of (empty-password-colon | passwordless) ×
+  // (query-string | no-query-string) so opts.ssl is always authoritative.
+  const noPass = stripUrlPassword(url);
+  return urlSpecifiesSsl(noPass) ? stripSslmodeFromUrl(noPass) : noPass;
 }

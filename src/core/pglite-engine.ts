@@ -4038,6 +4038,10 @@ export class PGLiteEngine implements BrainEngine {
       whereParts.push(`visibility = ANY($visibility)`);
       params.visibility = opts.visibility;
     }
+    if (opts.grep) {
+      whereParts.push(`fact ILIKE $grep`);
+      params.grep = `%${opts.grep}%`;
+    }
     for (const c of opts.whereClauses ?? []) whereParts.push(c);
     Object.assign(params, opts.whereParams ?? {});
 

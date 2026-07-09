@@ -153,4 +153,40 @@ describe('recall — federated read grant', () => {
     expect(res.total).toBe(2);
     expect(res.facts.length).toBe(2);
   });
+
+  test('grep is pushed into SQL — limit applies to matching rows, not the full window', async () => {
+    // Pre-fix: grep was applied client-side AFTER the limit window.
+    // On a source with e.g. 5,844 facts and limit=50, a grep over "needle"
+    // only saw the first 50 rows even if 500 matches existed elsewhere.
+    // Post-fix: grep is an ILIKE filter in the WHERE clause, so limit=N
+    // returns the N most-recent matching rows, not the N most-recent rows
+    // filtered by the substring.
+    //
+    // Test: insert facts where the matching one is older than the non-matching
+    // ones, then use limit=1 to show only the SQL-filtered result appears.
+    await engine.insertFact(
+      { fact: 'needle: specific search term', kind: 'fact', visibility: 'world', source: 'test' },
+      { source_id: 'company' },
+    );
+    await engine.insertFact(
+      { fact: 'hay one', kind: 'fact', visibility: 'world', source: 'test' },
+      { source_id: 'company' },
+    );
+    await engine.insertFact(
+      { fact: 'hay two', kind: 'fact', visibility: 'world', source: 'test' },
+      { source_id: 'company' },
+    );
+
+    const ctx = ctxFor({ remote: false, sourceId: 'company' });
+
+    // Without grep: most-recent 2 facts (hay two, hay one) — needle is older
+    const noGrep = await runRecall(ctx, { limit: 2 });
+    expect(noGrep.facts.map(f => f.fact)).not.toContain('needle: specific search term');
+
+    // With grep pushed into SQL: limit=2 returns the 2 most-recent MATCHING rows
+    // (only one exists: the needle fact). Client-side filtering would have returned
+    // zero because the needle didn't appear in the first-2 window.
+    const withGrep = await runRecall(ctx, { grep: 'needle', limit: 2 });
+    expect(withGrep.facts.map(f => f.fact)).toContain('needle: specific search term');
+  });
 });

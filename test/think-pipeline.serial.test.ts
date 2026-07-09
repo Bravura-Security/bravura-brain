@@ -207,6 +207,45 @@ describe('runThink (with stub client)', () => {
     expect(result.citations.length).toBeGreaterThanOrEqual(2);
   });
 
+  test('tolerant JSON parse: model wraps JSON in ```json fences → synthesisOk true, no LLM_OUTPUT_NOT_JSON', async () => {
+    // Verified live on bedrock sonnet-5: the model sometimes wraps its JSON
+    // response in markdown fences (```json\n{...}\n```). The pre-fix code hit
+    // LLM_OUTPUT_NOT_JSON and set synthesisOk:false. The fix extracts the JSON
+    // from the fences before failing — synthesisOk should be true on this path.
+    const payload = {
+      answer: 'Fenced answer [people/alice-example#1].',
+      citations: [{ page_slug: 'people/alice-example', row_num: 1, citation_index: 1 }],
+      gaps: [],
+    };
+    const stubClient: ThinkLLMClient = {
+      create: async () => ({
+        id: 'msg_fenced',
+        type: 'message',
+        role: 'assistant',
+        model: 'stub',
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, server_tool_use: null, service_tier: null },
+        content: [{
+          type: 'text',
+          // Live-observed bedrock sonnet-5 shape: JSON wrapped in markdown fences.
+          text: '```json\n' + JSON.stringify(payload) + '\n```',
+        }],
+      }),
+    };
+
+    const result = await runThink(engine, {
+      question: 'fenced json test',
+      client: stubClient,
+    });
+
+    expect(result.warnings).not.toContain('LLM_OUTPUT_NOT_JSON');
+    expect(result.synthesisOk).toBe(true);
+    expect(result.answer).toBe('Fenced answer [people/alice-example#1].');
+    expect(result.citations).toHaveLength(1);
+    expect(result.citations[0].page_slug).toBe('people/alice-example');
+  });
+
   test('degrades gracefully without ANTHROPIC_API_KEY', async () => {
     // Hermetic: neutralize BOTH the env var AND ~/.gbrain config key, else a
     // developer/CI machine with a configured key fires a real LLM call and this

@@ -3841,8 +3841,9 @@ const get_recent_transcripts: Operation = {
 const whoami: Operation = {
   name: 'whoami',
   description:
-    'Introspect the calling identity. Returns one of three transport shapes: ' +
+    'Introspect the calling identity. Returns one of four transport shapes: ' +
     '{transport: "oauth", client_id, client_name, scopes, expires_at}, ' +
+    '{transport: "cf-access", email, scopes}, ' +
     '{transport: "legacy", token_name, scopes, expires_at: null}, or ' +
     '{transport: "local", scopes: []}. Throws unknown_transport when the ' +
     'context is ambiguous (remote=true without auth) — fail-closed posture ' +
@@ -3865,6 +3866,18 @@ const whoami: Operation = {
           'This is a transport bug — every remote call site must populate ctx.auth ' +
           'or set ctx.remote === false.',
       );
+    }
+    // CF Access JWT callers have clientId of the form 'cf-access:<email>'
+    // (set by authenticateCfAccess in cf-access-auth.ts). Surface a distinct
+    // transport so callers can distinguish CF Access from legacy token auth
+    // instead of both falling into 'legacy'.
+    if (ctx.auth.clientId.startsWith('cf-access:')) {
+      const email = ctx.auth.clientId.slice('cf-access:'.length);
+      return {
+        transport: 'cf-access',
+        email,
+        scopes: ctx.auth.scopes,
+      };
     }
     // OAuth tokens have client_id starting with 'gbrain_cl_'; legacy
     // access_tokens reuse `name` as both clientId and clientName (verifyAccessToken
@@ -4110,14 +4123,17 @@ const recall: Operation = {
     include_expired: { type: 'boolean', description: 'When true, include expired_at IS NOT NULL rows. Default false.' },
     supersessions: { type: 'boolean', description: 'When true, return only the supersession audit log (expired_at + superseded_by both set).' },
     limit: { type: 'number', description: 'Max rows to return. Default 50, cap 100.' },
-    grep: { type: 'string', description: 'Substring filter on fact text (case-insensitive). Applied client-side after recall.' },
+    grep: { type: 'string', description: 'Substring filter on fact text (case-insensitive). Pushed into SQL (ILIKE) so the limit window applies to matching rows only.' },
     include_pending: { type: 'boolean', description: 'v0.32: when true, response includes pending_consolidation_count (facts not yet promoted to takes by the dream-cycle consolidate phase). One round trip; backward-compatible (field omitted when false).' },
   },
   scope: 'read',
   handler: async (ctx, p) => {
     const limit = typeof p.limit === 'number' ? p.limit : 50;
     const includeExpired = p.include_expired === true;
-    const grep = typeof p.grep === 'string' ? p.grep.toLowerCase() : null;
+    // grep is pushed into SQL via FactListOpts.grep (ILIKE) so the LIMIT window
+    // applies to matching rows — client-side filter after fetch saw only the first-50
+    // window of a 5,844-fact table and would miss matches beyond that window.
+    const grep = typeof p.grep === 'string' ? p.grep : null;
 
     // Source scope: span the caller's FULL federated read grant, not just the
     // scalar write source. Pre-fix, recall read only `ctx.sourceId ?? 'default'`
@@ -4179,6 +4195,7 @@ const recall: Operation = {
           activeOnly: !includeExpired,
           limit,
           visibility,
+          ...(grep ? { grep } : {}),
         });
       }
       if (typeof p.session_id === 'string' && p.session_id.length > 0) {
@@ -4186,6 +4203,7 @@ const recall: Operation = {
           activeOnly: !includeExpired,
           limit,
           visibility,
+          ...(grep ? { grep } : {}),
         });
       }
       if (p.since !== undefined) {
@@ -4195,6 +4213,7 @@ const recall: Operation = {
           activeOnly: !includeExpired,
           limit,
           visibility,
+          ...(grep ? { grep } : {}),
         });
       }
       // No filter: return recent across the source.
@@ -4202,6 +4221,7 @@ const recall: Operation = {
         activeOnly: !includeExpired,
         limit,
         visibility,
+        ...(grep ? { grep } : {}),
       });
     };
 
@@ -4213,8 +4233,6 @@ const recall: Operation = {
       rows.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
       rows = rows.slice(0, limit);
     }
-
-    if (grep) rows = rows.filter(r => r.fact.toLowerCase().includes(grep));
 
     // v0.32: optional pending-consolidation count piggy-backed on the recall
     // response. Single round trip on thin-client; omitted when not requested
