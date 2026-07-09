@@ -3860,6 +3860,7 @@ export class PostgresEngine implements BrainEngine {
     const activeOnly = opts?.activeOnly !== false;
     const kinds = (opts?.kinds && opts.kinds.length > 0) ? opts.kinds : null;
     const visibility = (opts?.visibility && opts.visibility.length > 0) ? opts.visibility : null;
+    const grep = opts?.grep ? `%${opts.grep}%` : null;
     const rows = await sql<FactRowSqlShape[]>`
       SELECT * FROM facts
       WHERE source_id = ${source_id}
@@ -3867,6 +3868,7 @@ export class PostgresEngine implements BrainEngine {
         ${activeOnly ? sql`AND expired_at IS NULL` : sql``}
         ${kinds ? sql`AND kind = ANY(${kinds}::text[])` : sql``}
         ${visibility ? sql`AND visibility = ANY(${visibility}::text[])` : sql``}
+        ${grep ? sql`AND fact ILIKE ${grep}` : sql``}
       ORDER BY valid_from DESC, id DESC
       LIMIT ${limit} OFFSET ${offset}
     `;
@@ -3885,6 +3887,7 @@ export class PostgresEngine implements BrainEngine {
     const kinds = (opts?.kinds && opts.kinds.length > 0) ? opts.kinds : null;
     const visibility = (opts?.visibility && opts.visibility.length > 0) ? opts.visibility : null;
     const entitySlug = opts?.entitySlug ?? null;
+    const grep = opts?.grep ? `%${opts.grep}%` : null;
     const rows = await sql<FactRowSqlShape[]>`
       SELECT * FROM facts
       WHERE source_id = ${source_id}
@@ -3893,6 +3896,7 @@ export class PostgresEngine implements BrainEngine {
         ${activeOnly ? sql`AND expired_at IS NULL` : sql``}
         ${kinds ? sql`AND kind = ANY(${kinds}::text[])` : sql``}
         ${visibility ? sql`AND visibility = ANY(${visibility}::text[])` : sql``}
+        ${grep ? sql`AND fact ILIKE ${grep}` : sql``}
       ORDER BY created_at DESC, id DESC
       LIMIT ${limit} OFFSET ${offset}
     `;
@@ -3910,6 +3914,7 @@ export class PostgresEngine implements BrainEngine {
     const activeOnly = opts?.activeOnly !== false;
     const kinds = (opts?.kinds && opts.kinds.length > 0) ? opts.kinds : null;
     const visibility = (opts?.visibility && opts.visibility.length > 0) ? opts.visibility : null;
+    const grep = opts?.grep ? `%${opts.grep}%` : null;
     const rows = await sql<FactRowSqlShape[]>`
       SELECT * FROM facts
       WHERE source_id = ${source_id}
@@ -3917,6 +3922,7 @@ export class PostgresEngine implements BrainEngine {
         ${activeOnly ? sql`AND expired_at IS NULL` : sql``}
         ${kinds ? sql`AND kind = ANY(${kinds}::text[])` : sql``}
         ${visibility ? sql`AND visibility = ANY(${visibility}::text[])` : sql``}
+        ${grep ? sql`AND fact ILIKE ${grep}` : sql``}
       ORDER BY created_at DESC, id DESC
       LIMIT ${limit} OFFSET ${offset}
     `;

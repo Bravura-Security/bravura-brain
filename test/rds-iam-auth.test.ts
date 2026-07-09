@@ -205,12 +205,17 @@ describe('maybeApplyIamAuth', () => {
     expect(opts.ssl).toEqual({ rejectUnauthorized: true });
   });
 
-  test('URL ?sslmode= wins — helper does not stomp URL-pinned ssl choice', () => {
+  test('URL ?sslmode= is stripped and opts.ssl is set (single ssl source of truth)', () => {
+    // Pre-fix: urlSpecifiesSsl guard left opts.ssl undefined and kept ?sslmode=
+    // in the URL, causing postgres.js to see conflicting ssl sources on the
+    // passwordless+query-string form (observed: host/port → "undefined:undefined").
+    // Post-fix: opts.ssl is always set; sslmode is stripped from the returned URL.
     const opts: Record<string, unknown> = {};
     const url = `${URL_WITH_PASS}?sslmode=verify-full`;
-    maybeApplyIamAuth(url, opts, { GBRAIN_DB_IAM_AUTH: '1' });
-    expect(opts.ssl).toBeUndefined(); // postgres.js reads sslmode from the URL itself
+    const out = maybeApplyIamAuth(url, opts, { GBRAIN_DB_IAM_AUTH: '1' });
+    expect(opts.ssl).toBe('require'); // opts.ssl is now always set
     expect(typeof opts.pass).toBe('function');
+    expect(out).not.toContain('sslmode'); // sslmode stripped from returned URL
   });
 
   test('GBRAIN_DB_SSL_CA_FILE upgrades ssl to CA-verified tls options', () => {
@@ -232,5 +237,49 @@ describe('maybeApplyIamAuth', () => {
     const out = maybeApplyIamAuth(URL_NO_PASS, opts, { GBRAIN_DB_IAM_AUTH: '1' });
     expect(out).toBe(URL_NO_PASS);
     expect(typeof opts.pass).toBe('function');
+  });
+
+  // ── 4-combination matrix: (empty-password-colon | passwordless) × (query | no-query) ──
+  // Pre-fix: the urlSpecifiesSsl guard left opts.ssl undefined when ?sslmode= was
+  // present, creating a double-ssl conflict with postgres.js's own sslmode handling
+  // on the passwordless+query-string form (host/port → "undefined:undefined" live).
+  // Post-fix: opts.ssl is always set; sslmode is stripped from the returned URL.
+
+  test('4-combo #1: empty-password-colon, no-query → strips colon, sets ssl', () => {
+    const url = `postgres://gbrain_app:@${HOST}:5432/gbrain`;
+    const opts: Record<string, unknown> = {};
+    const out = maybeApplyIamAuth(url, opts, { GBRAIN_DB_IAM_AUTH: '1' });
+    expect(out).toBe(`postgres://gbrain_app@${HOST}:5432/gbrain`);
+    expect(typeof opts.pass).toBe('function');
+    expect(opts.ssl).toBe('require');
+  });
+
+  test('4-combo #2: empty-password-colon, with-query → strips colon+sslmode, sets ssl', () => {
+    const url = `postgres://gbrain_app:@${HOST}:5432/gbrain?sslmode=require`;
+    const opts: Record<string, unknown> = {};
+    const out = maybeApplyIamAuth(url, opts, { GBRAIN_DB_IAM_AUTH: '1' });
+    expect(out).toBe(`postgres://gbrain_app@${HOST}:5432/gbrain`);
+    expect(typeof opts.pass).toBe('function');
+    expect(opts.ssl).toBe('require');
+    expect(out).not.toContain('sslmode');
+  });
+
+  test('4-combo #3: passwordless, no-query → pass wired, ssl set', () => {
+    const url = `postgres://gbrain_app@${HOST}:5432/gbrain`;
+    const opts: Record<string, unknown> = {};
+    const out = maybeApplyIamAuth(url, opts, { GBRAIN_DB_IAM_AUTH: '1' });
+    expect(out).toBe(url);
+    expect(typeof opts.pass).toBe('function');
+    expect(opts.ssl).toBe('require');
+  });
+
+  test('4-combo #4: passwordless, with-query → strips sslmode, sets ssl (was undefined:undefined live)', () => {
+    const url = `postgres://gbrain_app@${HOST}:5432/gbrain?sslmode=require`;
+    const opts: Record<string, unknown> = {};
+    const out = maybeApplyIamAuth(url, opts, { GBRAIN_DB_IAM_AUTH: '1' });
+    expect(out).toBe(`postgres://gbrain_app@${HOST}:5432/gbrain`);
+    expect(typeof opts.pass).toBe('function');
+    expect(opts.ssl).toBe('require');
+    expect(out).not.toContain('sslmode');
   });
 });

@@ -539,6 +539,12 @@ export interface FactListOpts {
    * are returned. Remote (untrusted) callers must supply ['world'].
    */
   visibility?: FactVisibility[];
+  /**
+   * SQL-level ILIKE filter on fact text (case-insensitive substring match).
+   * Applied in the WHERE clause BEFORE the LIMIT window so the caller's
+   * limit applies to matching rows, not to the unfiltered set.
+   */
+  grep?: string;
 }
 
 /** Per-source operational health snapshot consumed by `gbrain doctor`. */

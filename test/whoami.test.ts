@@ -74,6 +74,25 @@ describe('whoami op contract', () => {
     expect(result.expires_at).toBe(1234567890);
   });
 
+  test('cf-access transport returns email from cf-access:<email> clientId', async () => {
+    const auth: AuthInfo = {
+      token: 'eyJ...',
+      clientId: 'cf-access:alice@example.com',
+      clientName: 'alice@example.com',
+      scopes: ['read', 'write'],
+    };
+    const result = (await whoami.handler(
+      ctxWith({ remote: true, auth }),
+      {},
+    )) as any;
+    expect(result.transport).toBe('cf-access');
+    expect(result.email).toBe('alice@example.com');
+    expect(result.scopes).toEqual(['read', 'write']);
+    // CF Access shape does not expose token_name or client_id
+    expect(result.token_name).toBeUndefined();
+    expect(result.client_id).toBeUndefined();
+  });
+
   test('legacy transport (token name as clientId, no gbrain_cl_ prefix)', async () => {
     const auth: AuthInfo = {
       token: 'legacy-token',
