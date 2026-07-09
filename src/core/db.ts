@@ -1,5 +1,6 @@
 import postgres from 'postgres';
 import { GBrainError, type EngineConfig } from './types.ts';
+import { maybeApplyIamAuth } from './rds-iam-auth.ts';
 import { SCHEMA_SQL } from './schema-embedded.ts';
 import type { BrainEngine } from './engine.ts';
 import { verifySchema } from './schema-verify.ts';
@@ -260,7 +261,10 @@ export async function connect(config: EngineConfig): Promise<boolean> {
         );
       }
     }
-    sql = postgres(url, opts);
+    // RDS IAM auth (GBRAIN_DB_IAM_AUTH=1): wires async token `pass` + TLS,
+    // strips the (ignored) URL password. Identity function when the flag is off.
+    const effectiveUrl = maybeApplyIamAuth(url, opts);
+    sql = postgres(effectiveUrl, opts);
 
     // Test connection
     await sql`SELECT 1`;
