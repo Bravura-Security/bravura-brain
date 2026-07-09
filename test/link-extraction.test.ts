@@ -1554,3 +1554,193 @@ describe('extractFrontmatterLinks — pack-declared rules', () => {
     expect(unresolved).toHaveLength(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────
+// B2 — alias-aware resolver (step 2.5): slug_aliases + page_aliases
+// ─────────────────────────────────────────────────────────────────
+
+describe('makeResolver — alias-aware resolution (B2)', () => {
+  // Extended fake engine that supports both alias methods. Controls which
+  // paths exist, which slug_aliases exist, and which page_aliases exist.
+  function makeFakeEngineWithAliases(opts: {
+    slugs?: string[];
+    slugAliases?: Map<string, string>; // alias_slug → canonical
+    pageAliases?: Map<string, string[]>; // alias_norm → slug[]
+    fuzzyMap?: Map<string, { slug: string; similarity: number }>;
+    sourceId?: string;
+  }): BrainEngine {
+    const lookup = new Set(opts.slugs ?? []);
+    const slugAliases = opts.slugAliases ?? new Map();
+    const pageAliases = opts.pageAliases ?? new Map();
+    const fuzzyMap = opts.fuzzyMap ?? new Map();
+    const engine = {
+      async getPage(slug: string) {
+        return lookup.has(slug) ? { slug } as any : null;
+      },
+      async findByTitleFuzzy(name: string) {
+        return fuzzyMap.get(name) ?? null;
+      },
+      async searchKeyword() {
+        return [];
+      },
+      async resolveSlugWithAlias(aliasSlug: string, _source: string | string[]) {
+        return slugAliases.get(aliasSlug) ?? aliasSlug;
+      },
+      async resolveAliases(norms: string[], _opts?: { sourceId?: string }) {
+        const result = new Map<string, Array<{ slug: string; source_id: string }>>();
+        for (const n of norms) {
+          const slugs = pageAliases.get(n);
+          if (slugs) {
+            result.set(n, slugs.map((s: string) => ({ slug: s, source_id: opts.sourceId ?? 'default' })));
+          }
+        }
+        return result;
+      },
+    } as unknown as BrainEngine;
+    return engine;
+  }
+
+  // (a) alias resolves where fuzzy would miss
+  test('slug_aliases: resolves a display name that fuzzy would not find', async () => {
+    // "Hitachi ID Suite" → products/bravura-security-fabric via slug_aliases.
+    // No fuzzy map entry, so without alias step this would return null.
+    const engine = makeFakeEngineWithAliases({
+      slugs: ['products/bravura-security-fabric'],
+      slugAliases: new Map([['hitachi-id-suite', 'products/bravura-security-fabric']]),
+    });
+    const r = makeResolver(engine);
+    const result = await r.resolve('Hitachi ID Suite', 'products');
+    expect(result).toBe('products/bravura-security-fabric');
+  });
+
+  // (b) precedence: exact slug > slug_aliases > page_aliases > fuzzy
+  test('precedence: exact slug beats alias', async () => {
+    // Both an exact slug AND an alias entry exist. Exact slug wins.
+    const engine = makeFakeEngineWithAliases({
+      slugs: ['products/real-product', 'products/old-name'],
+      slugAliases: new Map([['old-name', 'products/real-product']]),
+    });
+    const r = makeResolver(engine);
+    // 'products/old-name' is an exact slug — resolves directly, never touches aliases.
+    const result = await r.resolve('products/old-name');
+    expect(result).toBe('products/old-name');
+  });
+
+  test('precedence: slug_aliases beats page_aliases', async () => {
+    // slug_aliases says "my-alias" → canonical-slug-a
+    // page_aliases says "my alias" → ['canonical-slug-b']
+    // slug_aliases must win.
+    const engine = makeFakeEngineWithAliases({
+      slugs: ['products/canonical-slug-a', 'products/canonical-slug-b'],
+      slugAliases: new Map([['my-alias', 'products/canonical-slug-a']]),
+      pageAliases: new Map([['my alias', [{ slug: 'products/canonical-slug-b' } as any]]]) as any,
+    });
+    const r = makeResolver(engine);
+    const result = await r.resolve('My Alias', 'products');
+    expect(result).toBe('products/canonical-slug-a');
+  });
+
+  test('precedence: page_aliases beats fuzzy', async () => {
+    // page_aliases maps "bravura pass" → products/bravura-pass
+    // fuzzy would return a different page
+    const engine = makeFakeEngineWithAliases({
+      slugs: ['products/bravura-pass'],
+      pageAliases: new Map([['bravura pass', ['products/bravura-pass']]]),
+      fuzzyMap: new Map([['Bravura Pass', { slug: 'products/different-page', similarity: 0.9 }]]),
+    });
+    const r = makeResolver(engine);
+    const result = await r.resolve('Bravura Pass', 'products');
+    expect(result).toBe('products/bravura-pass');
+  });
+
+  test('precedence: falls through to fuzzy when alias tables empty', async () => {
+    const engine = makeFakeEngineWithAliases({
+      slugs: ['companies/brex'],
+      slugAliases: new Map(), // nothing
+      pageAliases: new Map(), // nothing
+      fuzzyMap: new Map([['Brex', { slug: 'companies/brex', similarity: 0.8 }]]),
+    });
+    const r = makeResolver(engine);
+    const result = await r.resolve('Brex', 'companies');
+    expect(result).toBe('companies/brex');
+  });
+
+  // (c) CONNECTOR_METADATA_KEYS exclusion: alias step must not break it
+  test('CONNECTOR_METADATA_KEYS exclusion still works with alias-capable engine', async () => {
+    // engine with full alias support — exclusion must fire before resolver is
+    // even called, so CONNECTOR_METADATA_KEYS fields produce no candidates.
+    const engine = makeFakeEngineWithAliases({
+      slugs: ['meetings/2026-04-03'],
+      slugAliases: new Map([['meetings/2026-04-03', 'meetings/2026-04-03']]),
+    });
+    const resolver: SlugResolver = makeResolver(engine);
+    for (const key of CONNECTOR_METADATA_KEYS) {
+      const { candidates, unresolved } = await extractFrontmatterLinks(
+        'people/pedro', 'person' as never, { [key]: 'meetings/2026-04-03' }, resolver,
+      );
+      expect(candidates, `key=${key} should produce no candidates`).toHaveLength(0);
+      expect(unresolved, `key=${key} should produce no unresolved`).toHaveLength(0);
+    }
+  });
+
+  // (d) fail-open: engine without alias methods degrades to fuzzy cascade unchanged
+  test('fail-open: engine without resolveSlugWithAlias/resolveAliases falls through to fuzzy', async () => {
+    // Minimal engine — no alias methods. Fuzzy WOULD match.
+    const engine = {
+      async getPage(slug: string) { return slug === 'companies/stripe' ? { slug } as any : null; },
+      async findByTitleFuzzy(name: string) {
+        return name === 'Stripe' ? { slug: 'companies/stripe', similarity: 0.9 } : null;
+      },
+      async searchKeyword() { return []; },
+    } as unknown as BrainEngine;
+    const r = makeResolver(engine);
+    const result = await r.resolve('Stripe', 'companies');
+    expect(result).toBe('companies/stripe');
+  });
+
+  test('fail-open: resolveSlugWithAlias throws → falls through to page_aliases then fuzzy', async () => {
+    const engine = {
+      async getPage(slug: string) { return slug === 'products/bravura-pass' ? { slug } as any : null; },
+      async findByTitleFuzzy() { return null; },
+      async searchKeyword() { return []; },
+      async resolveSlugWithAlias(_: string, __: string) { throw new Error('db error'); },
+      async resolveAliases(norms: string[]) {
+        const m = new Map<string, Array<{ slug: string; source_id: string }>>();
+        if (norms.includes('bravura pass')) m.set('bravura pass', [{ slug: 'products/bravura-pass', source_id: 'default' }]);
+        return m;
+      },
+    } as unknown as BrainEngine;
+    const r = makeResolver(engine);
+    const result = await r.resolve('Bravura Pass', 'products');
+    // resolveSlugWithAlias threw → page_aliases resolves
+    expect(result).toBe('products/bravura-pass');
+  });
+
+  test('dirHint preference: picks alias hit that starts with the hint prefix', async () => {
+    const engine = makeFakeEngineWithAliases({
+      slugs: ['customers/acme', 'companies/acme'],
+      pageAliases: new Map([
+        ['acme', [
+          { slug: 'companies/acme', source_id: 'default' } as any,
+          { slug: 'customers/acme', source_id: 'default' } as any,
+        ]],
+      ]) as any,
+    });
+    const r = makeResolver(engine);
+    const result = await r.resolve('Acme', 'customers');
+    // hint = 'customers' → prefer customers/acme over companies/acme
+    expect(result).toBe('customers/acme');
+  });
+
+  test('slug-path that misses exact resolves via slug_aliases (redirect pattern)', async () => {
+    // [[old-products/legacy]] → products/canonical via slug_aliases.
+    // Must NOT fuzzy — explicit path miss with alias redirect.
+    const engine = makeFakeEngineWithAliases({
+      slugs: ['products/canonical'],
+      slugAliases: new Map([['old-products/legacy', 'products/canonical']]),
+    });
+    const r = makeResolver(engine);
+    const result = await r.resolve('old-products/legacy');
+    expect(result).toBe('products/canonical');
+  });
+});

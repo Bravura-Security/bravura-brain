@@ -16,6 +16,7 @@ import type { PageType } from './types.ts';
 import type { SchemaPackManifest } from './schema-pack/manifest-v1.ts';
 import { frontmatterMappingsFromPack } from './schema-pack/link-inference.ts';
 import { ensureWellFormed } from './text-safe.ts';
+import { normalizeAlias } from './search/alias-normalize.ts';
 
 /**
  * The slice of an active schema-pack manifest the frontmatter extractor
@@ -971,6 +972,54 @@ export function makeResolver(
     return idx;
   }
 
+  // Alias-table lookup — exact match on the value, case-insensitive. Runs
+  // AFTER the exact-slug steps and BEFORE fuzzy title matching, so a curated
+  // alias is authoritative for recurring unresolved refs (e.g. "Hitachi ID
+  // Suite" → products/bravura-security-fabric) but can never shadow a real
+  // slug. Two tables, checked in order:
+  //   1. slug_aliases  — curated redirects (`gbrain alias-add`, unify-types
+  //      minion). Keyed by slugified value; canonical verified to exist so a
+  //      dangling alias (doctor check) can't mint a junk edge.
+  //   2. page_aliases  — the frontmatter `aliases:` projection (normalizeAlias
+  //      keys). May resolve to >1 slug; pick deterministically, preferring a
+  //      dirHint-prefixed slug, else first (resolveAliases sorts source, slug).
+  // Fail-open throughout: engines/fakes without the methods and pre-v104/v110
+  // brains missing the tables degrade to the fuzzy cascade unchanged.
+  async function resolveViaAliases(value: string, hints: string[]): Promise<string | null> {
+    const aliasSlug = SLUG_PATH_VALUE_RE.test(value) ? value.toLowerCase() : norm(value);
+    if (aliasSlug && typeof engine.resolveSlugWithAlias === 'function') {
+      try {
+        // Scope: unscoped resolvers fall back to 'default' — the same source
+        // `gbrain alias-add` writes to without an explicit source (engine
+        // convention: unset sourceId reads/writes against 'default').
+        const canonical = await engine.resolveSlugWithAlias(aliasSlug, opts.sourceId ?? 'default');
+        if (canonical !== aliasSlug) {
+          const page = await engine.getPage(canonical);
+          if (page) return canonical;
+        }
+      } catch { /* fail open to page_aliases / fuzzy */ }
+    }
+    if (typeof engine.resolveAliases === 'function') {
+      try {
+        const aliasNorm = normalizeAlias(value);
+        if (aliasNorm) {
+          const map = await engine.resolveAliases(
+            [aliasNorm],
+            opts.sourceId ? { sourceId: opts.sourceId } : undefined,
+          );
+          const hits = map.get(aliasNorm);
+          if (hits && hits.length > 0) {
+            const preferred = hints.length > 0
+              ? (hits.find(h => hints.some(hh => h.slug.startsWith(`${hh}/`))) ?? hits[0])
+              : hits[0];
+            return preferred.slug;
+          }
+        }
+      } catch { /* fail open to fuzzy */ }
+    }
+    return null;
+  }
+
   return {
     async resolveBasenameMatches(name: string): Promise<string[]> {
       // Issue #972 (codex [P2] DRY): shared query so resolver + FS + doctor
@@ -1004,9 +1053,16 @@ export function makeResolver(
       if (SLUG_PATH_VALUE_RE.test(trimmed)) {
         const exact = trimmed.toLowerCase();
         const page = await engine.getPage(exact);
-        const result = page ? exact : null;
-        cache.set(cacheKey, result);
-        return result;
+        if (page) {
+          cache.set(cacheKey, exact);
+          return exact;
+        }
+        // An explicit path that misses may be a REGISTERED slug alias
+        // (slug_aliases redirect: [[old-slug]] → canonical). Alias-table
+        // only — exact match, verified target, still NO fuzzy fallback.
+        const viaAlias = await resolveViaAliases(trimmed, []);
+        cache.set(cacheKey, viaAlias);
+        return viaAlias;
       }
 
       // Step 2: dir-hint + slugify → exact getPage
@@ -1019,6 +1075,14 @@ export function makeResolver(
           cache.set(cacheKey, candidate);
           return candidate;
         }
+      }
+
+      // Step 2.5: alias tables (slug_aliases, page_aliases) — exact match on
+      // the value, case-insensitive. Precedence: exact slug > alias > fuzzy.
+      const viaAlias = await resolveViaAliases(trimmed, hints);
+      if (viaAlias) {
+        cache.set(cacheKey, viaAlias);
+        return viaAlias;
       }
 
       // Step 3: pg_trgm fuzzy title match — both modes. Tries each hint in
