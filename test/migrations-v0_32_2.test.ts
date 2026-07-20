@@ -236,6 +236,27 @@ describe('phaseBFenceFacts — happy path backfill', () => {
     const rows = await (engine as any).db.query('SELECT row_num FROM facts');
     expect(rows.rows[0].row_num).toBeNull();
   });
+
+  test('defers (not fails) when local_path directory does not exist on this host', async () => {
+    // Point the source at a checkout that only exists elsewhere.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+      [join(brainDir, 'not-materialized-here')],
+    );
+    await seedLegacyFact({ entity_slug: 'people/alice', fact: 'Fence me later' });
+
+    const r = await __testing.phaseBFenceFacts(engine, OPTS);
+    expect(r.status).toBe('complete');
+    expect(r.detail).toContain('deferred_checkout_missing=1');
+    expect(r.deferred).toBe(1);
+
+    // No stub directory/file conjured into the missing path; row stays legacy.
+    expect(existsSync(join(brainDir, 'not-materialized-here'))).toBe(false);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = await (engine as any).db.query('SELECT row_num FROM facts');
+    expect(rows.rows[0].row_num).toBeNull();
+  });
 });
 
 describe('phaseCVerify', () => {
@@ -267,6 +288,22 @@ describe('phaseCVerify', () => {
     expect(r.detail).toContain('drifted');
     expect(r.detail).toContain('people/alice');
   });
+
+  test('skips verification (not drift) when the checkout directory is missing on this host', async () => {
+    await seedLegacyFact({ entity_slug: 'people/alice', fact: 'F1' });
+    await __testing.phaseBFenceFacts(engine, OPTS);
+
+    // Fenced rows exist, but this host can no longer see the checkout.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+      [join(brainDir, 'gone-elsewhere')],
+    );
+
+    const r = await __testing.phaseCVerify(engine, OPTS);
+    expect(r.status).toBe('complete');
+    expect(r.detail).toContain('unverifiable_checkout_missing=1');
+  });
 });
 
 describe('orchestrator end-to-end', () => {
@@ -278,6 +315,20 @@ describe('orchestrator end-to-end', () => {
     expect(result.status).toBe('complete');
     expect(result.phases.map(p => p.name)).toEqual(['schema', 'fence_facts', 'verify']);
     expect(result.phases.every(p => p.status === 'complete')).toBe(true);
+  });
+
+  test('missing checkout returns status:partial (exit 0 on boot), never failed', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+      [join(brainDir, 'other-pod-workspace')],
+    );
+    await seedLegacyFact({ entity_slug: 'people/alice', fact: 'Founded Acme' });
+
+    const result = await v0_32_2.orchestrator(OPTS);
+    expect(result.status).toBe('partial');
+    expect(result.phases.find(p => p.name === 'fence_facts')?.status).toBe('complete');
+    expect(result.phases.find(p => p.name === 'verify')?.status).not.toBe('failed');
   });
 
   test('dry-run returns 3 phases all skipped (no FS or DB changes)', async () => {

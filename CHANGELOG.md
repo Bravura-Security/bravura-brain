@@ -2,6 +2,15 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.55.0] - 2026-07-20
+
+**Boot no longer wedges when a source's checkout lives on another host.** Migration v0.32.2's fact-fencing backfill assumed every source's `local_path` is visible to the process running migrations. In split deployments — the server runs boot-time migrations in one pod while source checkouts are materialized in sync/autopilot pods — every fence write failed and the migrate step exited non-zero on each boot, crash-looping the server. Fencing for a source whose checkout directory doesn't exist on the current host is now deferred instead of fatal: the migration reports `partial`, boot continues, and a later `gbrain apply-migrations --yes` from a host that has the checkout finishes the backfill.
+
+To take advantage of v0.42.55.0: upgrade and restart. If your server was crash-looping in the migrate init step, it will now boot; then run `gbrain apply-migrations --yes` from a host with each source's checkout to complete the v0.32.2 fence backfill.
+
+### Fixed
+- **v0.32.2 migration defers fencing for sources whose checkout is missing on this host.** Phase B skips those sources (`deferred_checkout_missing=N` in the phase detail) and the run reports overall `partial` so the outstanding work stays visible; phase C counts their fenced pages as `unverifiable_checkout_missing=N` instead of flagging fence drift. Previously each affected page landed in `failed_pages`, the phase went fatal, and `apply-migrations` exited 1.
+
 ## [0.42.54.0] - 2026-07-01
 
 **New bundled schema pack `gbrain-personal` for per-user personal brains.** A thin pack (extends `gbrain-recommended`) that gives an individual's brain the page types, filing rules, and links a nightly enrich/distill agent needs to turn raw inbox signals — meetings, email, calendar, chats collected client-side via the user's own MCPs — into compiled people/companies/meetings/daily pages. Facts come from each source's structured fields; the filing rules forbid inferring a person or company from free text.
