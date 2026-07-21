@@ -13,6 +13,21 @@ host running migrations, but the deferred work still needs a home.
   sync/autopilot path to fence its own source's legacy rows opportunistically
   (it already holds the checkout and the git push channel). Where:
   `src/commands/migrations/v0_32_2.ts`, `src/commands/sync.ts`, deploy templates.
+  *2026-07-21 progress:* ran `apply-migrations --yes --migration 0.32.2` from the
+  autopilot pod — the company source had zero fenceable legacy rows; the remaining
+  18 legacy rows belong to a personal source whose cronjob clones with a read-only
+  deploy key ("DB→git push-back is a deliberate follow-up"), so fencing there would
+  write into an unpushable emptyDir. Blocked on the RW-key push-back follow-up.
+- [x] **P2 — v0.32.2 verify reports large-scale fence drift on the company source.**
+  DONE v0.42.56.0. Root cause was a verify false positive: phase C counted every
+  `row_num IS NOT NULL` row, including the NEGATIVE keyspace that frontmatter
+  promotion uses for its not-fence-owned `import:` rows — every promoted page
+  reported `fence=0, db=N` forever. Verify now scopes to `row_num > 0`. Real
+  drift (fence-owned rows whose fence writes landed on an ephemeral filesystem)
+  gets a repair path (`gbrain reconcile-fences`, DB→disk with row_nums
+  preserved) and a `facts_fence_drift` doctor check; phase B additionally seeds
+  new row_nums above the page's max existing positive row_num so drifted pages
+  can't fail on the v51 UNIQUE index.
 - [ ] **P3 — Boot-time migration ledger is ephemeral in container deployments.**
   `~/.gbrain/completed.jsonl` lives in the pod filesystem, so every pod restart
   re-runs the whole orchestrator chain (harmless but noisy, and the wedged-cap

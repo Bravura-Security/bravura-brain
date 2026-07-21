@@ -56,10 +56,22 @@ function makeGitRepo(commitDate: Date, registry: string[]): { dir: string; head:
 
 let engine: PGLiteEngine;
 
+// The content_chunks.embedding width is resolved from process-global
+// gateway state at initSchema time — other test files in the same shard
+// can leave it at a non-1536 width (same class as the facts-engine
+// fixture fix in v0.42.55.2). The coverage assertions below only care
+// whether an embedding is present, so size the fixture to the real column.
+let chunkEmbeddingDims = 1536;
+
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  const col = await engine.executeRaw<{ dims: number }>(
+    `SELECT atttypmod AS dims FROM pg_attribute
+      WHERE attrelid = 'content_chunks'::regclass AND attname = 'embedding'`,
+  );
+  if (col[0]?.dims > 0) chunkEmbeddingDims = col[0].dims;
 }, 30000);
 
 afterAll(async () => {
@@ -240,7 +252,7 @@ describe('computeAllSourceMetrics', () => {
     await engine.putPage('a', { type: 'note', title: 'a', compiled_truth: 'a' });
     await engine.putPage('b', { type: 'note', title: 'b', compiled_truth: 'b' });
     await engine.upsertChunks('a', [
-      { chunk_index: 0, chunk_text: 'one', chunk_source: 'compiled_truth', token_count: 1, embedding: new Float32Array(1536) },
+      { chunk_index: 0, chunk_text: 'one', chunk_source: 'compiled_truth', token_count: 1, embedding: new Float32Array(chunkEmbeddingDims) },
       { chunk_index: 1, chunk_text: 'two', chunk_source: 'compiled_truth', token_count: 1, embedding: undefined },
     ]);
     await engine.upsertChunks('b', [

@@ -290,6 +290,23 @@ async function phaseBFenceFacts(
         const existingFence = parseFactsFence(body);
         const existingKeySet = new Set(existingFence.facts.map(f => `${f.claim}\0${f.source ?? ''}`));
 
+        // Seed the append counter above BOTH the fence's max row_num and
+        // the DB's max positive row_num for this page. Fence drift can
+        // leave the DB knowing higher row_nums than the fence shows (rows
+        // fenced on a host whose writes never reached this checkout);
+        // appending at fence-max+1 would then collide with the v51 partial
+        // UNIQUE index (source_id, source_markdown_slug, row_num) and fail
+        // the page.
+        const dbMaxRes = await engine.executeRaw<{ max: number }>(
+          `SELECT COALESCE(MAX(row_num), 0)::int AS max FROM facts
+            WHERE source_id = $1 AND source_markdown_slug = $2 AND row_num > 0`,
+          [sourceId, entitySlug],
+        );
+        const fenceMax = existingFence.facts.length > 0
+          ? Math.max(...existingFence.facts.map(f => f.rowNum))
+          : 0;
+        let nextRowNum = Math.max(Number(dbMaxRes[0]?.max ?? 0), fenceMax) + 1;
+
         const assignments: Array<{ id: string; row_num: number }> = [];
         for (const row of group) {
           const key = `${row.fact}\0${row.source ?? ''}`;
@@ -312,6 +329,7 @@ async function phaseBFenceFacts(
                 .toISOString().slice(0, 10)
             : undefined;
           const { body: updated, rowNum } = upsertFactRow(body, {
+            rowNum:     nextRowNum,
             claim:      row.fact,
             kind:       row.kind,
             confidence: row.confidence,
@@ -323,6 +341,7 @@ async function phaseBFenceFacts(
             context:    row.context ?? undefined,
           });
           body = updated;
+          nextRowNum += 1;
           existingKeySet.add(key);
           assignments.push({ id: row.id, row_num: rowNum });
         }
@@ -390,10 +409,16 @@ async function phaseCVerify(
     const localPathById = new Map<string, string | null>();
     for (const s of sources) localPathById.set(s.id, s.local_path);
 
+    // Fence-owned rows only (row_num > 0). The NEGATIVE keyspace belongs
+    // to import:-origin frontmatter-promotion rows
+    // (src/core/frontmatter-promotion.ts) — they key under the v51 UNIQUE
+    // index but are never rendered into a fence, so counting them here
+    // reports permanent phantom drift ("fence=0, db=N" on every promoted
+    // page) on any brain that uses frontmatter promotion.
     const groups = await engine.executeRaw<{ source_id: string; source_markdown_slug: string; n: string }>(
       `SELECT source_id, source_markdown_slug, COUNT(*) AS n
          FROM facts
-        WHERE row_num IS NOT NULL
+        WHERE row_num > 0
         GROUP BY source_id, source_markdown_slug`,
     );
 

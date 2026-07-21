@@ -204,6 +204,37 @@ describe('phaseBFenceFacts — happy path backfill', () => {
     expect(rows.rows.map((r: { row_num: number }) => r.row_num)).toEqual([1, 2]);
   });
 
+  test('seeds row_num above existing positive DB row_nums (fence-drift collision)', async () => {
+    // A drifted page: DB already holds fenced rows 1-2 for people/alice
+    // but the checkout shows no fence (writes landed on another host).
+    // Fencing a new legacy row must NOT reuse row_num 1 — that collides
+    // with the v51 UNIQUE index and fails the page.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, notability,
+                          valid_from, source, confidence, row_num, source_markdown_slug)
+       VALUES ('default', 'people/alice', 'Drifted row one', 'fact', 'private', 'medium',
+               now(), 'mcp:put_page', 1.0, 1, 'people/alice'),
+              ('default', 'people/alice', 'Drifted row two', 'fact', 'private', 'medium',
+               now(), 'mcp:put_page', 1.0, 2, 'people/alice')`,
+    );
+    const legacyId = await seedLegacyFact({ entity_slug: 'people/alice', fact: 'New legacy row' });
+
+    const r = await __testing.phaseBFenceFacts(engine, OPTS);
+    expect(r.status).toBe('complete');
+    expect(r.detail).toContain('fenced=1');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = await (engine as any).db.query(
+      'SELECT id, row_num FROM facts WHERE id = $1', [legacyId],
+    );
+    expect(rows.rows[0].row_num).toBe(3);
+
+    const body = readFileSync(join(brainDir, 'people/alice.md'), 'utf-8');
+    const parsed = parseFactsFence(body);
+    expect(parsed.facts.map(f => f.rowNum)).toEqual([3]);
+  });
+
   test('skips facts with NULL entity_slug (unfenceable)', async () => {
     await seedLegacyFact({ entity_slug: 'people/alice', fact: 'Fenceable' });
     await seedLegacyFact({ entity_slug: null, fact: 'Unfenceable' });
@@ -287,6 +318,25 @@ describe('phaseCVerify', () => {
     expect(r.status).toBe('failed');
     expect(r.detail).toContain('drifted');
     expect(r.detail).toContain('people/alice');
+  });
+
+  test('ignores the negative row_num keyspace (import: frontmatter promotion)', async () => {
+    // Frontmatter-promotion rows key under the v51 UNIQUE index with
+    // NEGATIVE row_nums and are never rendered into a fence
+    // (src/core/frontmatter-promotion.ts). No file on disk = healthy.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, notability,
+                          valid_from, source, confidence, row_num, source_markdown_slug)
+       VALUES ('default', 'meetings/2026-01-05-sync', 'Outcome A', 'fact', 'private', 'medium',
+               now(), 'import:frontmatter', 1.0, -1, 'meetings/2026-01-05-sync'),
+              ('default', 'meetings/2026-01-05-sync', 'Outcome B', 'fact', 'private', 'medium',
+               now(), 'import:frontmatter', 1.0, -2, 'meetings/2026-01-05-sync')`,
+    );
+
+    const r = await __testing.phaseCVerify(engine, OPTS);
+    expect(r.status).toBe('complete');
+    expect(r.detail).toContain('pages_checked=0');
   });
 
   test('skips verification (not drift) when the checkout directory is missing on this host', async () => {

@@ -1692,6 +1692,16 @@ async function handleCliOnly(command: string, args: string[]) {
         await runReconcileLinksCli(engine, args);
         break;
       }
+      case 'reconcile-fences': {
+        // v0.42.56.0: re-materialize fence-owned facts rows (row_num > 0)
+        // whose fence rows are missing from the source checkout — fence
+        // writes that landed on an ephemeral filesystem. DB → disk,
+        // row_nums preserved, idempotent; conflicts reported, never
+        // overwritten.
+        const { runReconcileFencesCli } = await import('./commands/reconcile-fences.ts');
+        await runReconcileFencesCli(engine, args);
+        break;
+      }
       case 'orphans': {
         const { runOrphans } = await import('./commands/orphans.ts');
         await runOrphans(engine, args);
@@ -2299,6 +2309,7 @@ CODE INDEXING (v0.19.0 / v0.20.0 Cathedral II)
   query <q> --lang <l>               Filter hybrid search to one language (v0.20.0)
   query <q> --symbol-kind <k>        Filter to symbol type (function|class|method|...) (v0.20.0)
   reconcile-links [--dry-run]        Batch-recompute doc↔impl edges (v0.20.0)
+  reconcile-fences [--source id] [--dry-run] [--allow-dirty]  Restore missing facts-fence rows from the DB (v0.42.56.0)
   reindex-code [--source id] [--yes] Explicit code-page reindex (v0.20.0)
   sync --strategy code               Sync code files into the brain
 

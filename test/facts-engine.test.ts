@@ -20,14 +20,26 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  // Resolve the ACTUAL facts.embedding column width. The schema's dimension
+  // comes from process-global gateway state at initSchema time, which other
+  // test files in the same run can leave at ZE/1280 instead of the legacy
+  // preload's OpenAI/1536 — CI shard runs have failed here with `expected
+  // 1280 dimensions, not 1536`. The tests below pin cosine ORDERING, which
+  // is dimension-independent, so size fixtures to whatever the column is.
+  const col = await engine.executeRaw<{ dims: number }>(
+    `SELECT atttypmod AS dims FROM pg_attribute
+      WHERE attrelid = 'facts'::regclass AND attname = 'embedding'`,
+  );
+  if (col[0]?.dims > 0) factsEmbeddingDims = col[0].dims;
 });
 
 afterAll(async () => {
   await engine.disconnect();
 });
 
+let factsEmbeddingDims = 1536;
 const vec = (...vals: number[]): Float32Array => {
-  const a = new Float32Array(1536);
+  const a = new Float32Array(factsEmbeddingDims);
   for (let i = 0; i < vals.length; i++) a[i] = vals[i];
   return a;
 };
