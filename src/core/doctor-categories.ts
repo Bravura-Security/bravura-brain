@@ -77,6 +77,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'extract_health',
   'facts_embedding_width_consistency',
   'facts_extraction_health',
+  'facts_fence_drift',
   'facts_health',
   'frontmatter_integrity',
   'grade_confidence_drift',

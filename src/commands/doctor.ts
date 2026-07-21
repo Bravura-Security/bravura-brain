@@ -7074,6 +7074,62 @@ export async function buildChecks(
     });
   }
 
+  // 11.6 facts_fence_drift (v0.42.56.0). Fence-owned facts rows
+  // (row_num > 0) whose fence row is absent from the materialized
+  // checkout — the file is missing or the fence lacks the row. Arises
+  // when fence writes land on a filesystem the checkout never sees
+  // (ephemeral pod clone). Checkouts absent on this host are reported
+  // as unverifiable, not drift (split-topology deployments).
+  progress.heartbeat('facts_fence_drift');
+  try {
+    const factsExists = await engine.executeRaw<{ exists: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'facts') AS exists`,
+    );
+    if (factsExists[0]?.exists) {
+      const { detectFenceDrift } = await import('./reconcile-fences.ts');
+      const report = await detectFenceDrift(engine);
+      const driftedTotal = report.sources.reduce((a, s) => a + s.pagesDrifted, 0);
+      const unverifiable = report.sources.reduce((a, s) => a + s.unverifiable, 0);
+      const perSource = report.sources
+        .filter(s => s.pagesDrifted > 0 || s.unverifiable > 0 || s.pagesChecked > 0)
+        .map(s =>
+          `${s.sourceId}: ${s.pagesDrifted}/${s.pagesChecked} drifted` +
+          (s.unverifiable > 0 ? ` (+${s.unverifiable} unverifiable)` : ''))
+        .join('; ') || 'no fence-owned facts';
+      if (driftedTotal > 0) {
+        checks.push({
+          name: 'facts_fence_drift',
+          status: 'fail',
+          message:
+            `${driftedTotal} pages with fence drift — ${perSource}. ` +
+            `Run 'gbrain reconcile-fences [--source <id>]' from a host with the source checkout ` +
+            `to re-materialize missing fence rows from the DB.`,
+          // Needs a host that can see (and push) the source checkout —
+          // not schedulable as a background job from an arbitrary pod.
+          remediation_status: 'human_only',
+        });
+      } else {
+        checks.push({
+          name: 'facts_fence_drift',
+          status: 'ok',
+          message: `no fence drift — ${perSource}`,
+        });
+      }
+    } else {
+      checks.push({
+        name: 'facts_fence_drift',
+        status: 'ok',
+        message: 'facts table not present (pre-v0.31 brain or migration pending)',
+      });
+    }
+  } catch (e) {
+    checks.push({
+      name: 'facts_fence_drift',
+      status: 'warn',
+      message: `facts_fence_drift probe failed: ${e instanceof Error ? e.message : String(e)}`,
+    });
+  }
+
   // 12. Index audit (opt-in via --index-audit). v0.13.1 follow-up to #170.
   // Reports indexes with zero recorded scans on Postgres. Informational only;
   // we DO NOT auto-drop. On #170's brain, idx_pages_frontmatter and

@@ -142,6 +142,7 @@ Stable phase names shipped in v0.15.2:
 - `migrate.copy_pages`, `migrate.copy_links`
 - `repair_jsonb.run`, `repair_jsonb.<table>.<column>`
 - `backlinks.scan`
+- `reconcile_fences.repair`
 - `lint.pages`
 - `integrity.auto`
 - `eval.single`, `eval.ab`

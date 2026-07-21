@@ -18,14 +18,16 @@ host running migrations, but the deferred work still needs a home.
   18 legacy rows belong to a personal source whose cronjob clones with a read-only
   deploy key ("DB→git push-back is a deliberate follow-up"), so fencing there would
   write into an unpushable emptyDir. Blocked on the RW-key push-back follow-up.
-- [ ] **P2 — v0.32.2 verify reports large-scale fence drift on the company source.**
-  A checkout-side run of the v0.32.2 verify phase found thousands of pages where
-  facts rows have `row_num` set but the fence rows are missing from the checkout
-  file (`file missing` / `fence=0, db=N`) — DB claims fences that git doesn't have,
-  likely written into an ephemeral filesystem before the split-topology guard
-  existed. Needs a reconcile path (re-fence from DB or clear row_num) and probably
-  a `gbrain doctor` check. Where: `src/commands/migrations/v0_32_2.ts` (verify),
-  `src/commands/doctor.ts`.
+- [x] **P2 — v0.32.2 verify reports large-scale fence drift on the company source.**
+  DONE v0.42.56.0. Root cause was a verify false positive: phase C counted every
+  `row_num IS NOT NULL` row, including the NEGATIVE keyspace that frontmatter
+  promotion uses for its not-fence-owned `import:` rows — every promoted page
+  reported `fence=0, db=N` forever. Verify now scopes to `row_num > 0`. Real
+  drift (fence-owned rows whose fence writes landed on an ephemeral filesystem)
+  gets a repair path (`gbrain reconcile-fences`, DB→disk with row_nums
+  preserved) and a `facts_fence_drift` doctor check; phase B additionally seeds
+  new row_nums above the page's max existing positive row_num so drifted pages
+  can't fail on the v51 UNIQUE index.
 - [ ] **P3 — Boot-time migration ledger is ephemeral in container deployments.**
   `~/.gbrain/completed.jsonl` lives in the pod filesystem, so every pod restart
   re-runs the whole orchestrator chain (harmless but noisy, and the wedged-cap

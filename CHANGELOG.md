@@ -2,6 +2,20 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.56.0] - 2026-07-21
+
+**Fence-drift verification stops crying wolf, and real drift gets a repair path.** The v0.32.2 verify phase counted every facts row with a `row_num` — including the negative keyspace frontmatter promotion uses for rows that are deliberately NOT rendered into a `## Facts` fence. On any brain using frontmatter promotion, verify reported every promoted page as drifted (`fence=0, db=N`), burying the signal. Verify now checks fence-owned rows only. For drift that IS real — fence writes that landed on a filesystem the source checkout never sees, e.g. an ephemeral pod clone — the new `gbrain reconcile-fences` command re-materializes the missing fence rows from the DB (row_nums preserved, hand-edits and disk-ahead rows untouched, conflicts reported rather than overwritten), and a new `facts_fence_drift` doctor check keeps the class visible.
+
+To take advantage of v0.42.56.0: upgrade, then re-run `gbrain apply-migrations --yes --migration 0.32.2` from a host with your source checkouts — verify now reports the true drift count. If it (or `gbrain doctor`) reports drift, run `gbrain reconcile-fences --source <id>` from a host with that source's checkout.
+
+### Added
+- **`gbrain reconcile-fences [--source id] [--dry-run] [--json] [--allow-dirty]`** — detects and repairs fence drift (fence-owned facts rows whose fence row is missing from the checkout). DB → disk, idempotent, per-page locked, atomic writes; missing page files are materialized from the full DB page (frontmatter + body + timeline), never a stub. Dirty-tree refusal by default; `--allow-dirty` for checkouts where a sync sidecar owns the commit loop.
+- **`facts_fence_drift` doctor check** (brain category) — per-source drift summary from the same detector; checkouts absent on this host count as unverifiable, not drift.
+
+### Fixed
+- **v0.32.2 phase C verify scopes to `row_num > 0`.** The negative keyspace (`import:`-origin frontmatter-promotion rows) keys under the v51 UNIQUE index but never appears in a fence; counting it produced permanent phantom drift reports.
+- **v0.32.2 phase B seeds new row_nums above the page's max existing positive row_num** (not just the fence's max), so backfilling a legacy row onto a drifted page no longer collides with the v51 UNIQUE index and fails the page.
+
 ## [0.42.55.2] - 2026-07-21
 
 **CI: the facts-engine cosine-ordering test no longer flakes on embedding width.** `test/facts-engine.test.ts` hardcoded 1536-d vector fixtures, but the schema's `facts.embedding` width is resolved from process-global gateway state at `initSchema` time — which other test files in the same shard can leave at the ZE-era 1280 default, failing the insert with `expected 1280 dimensions, not 1536`. The test now reads the actual column width after `initSchema` and sizes its fixtures to match; the contract it pins (cosine ordering) is dimension-independent.
