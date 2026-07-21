@@ -2,6 +2,15 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.55.2] - 2026-07-21
+
+**CI: the facts-engine cosine-ordering test no longer flakes on embedding width.** `test/facts-engine.test.ts` hardcoded 1536-d vector fixtures, but the schema's `facts.embedding` width is resolved from process-global gateway state at `initSchema` time — which other test files in the same shard can leave at the ZE-era 1280 default, failing the insert with `expected 1280 dimensions, not 1536`. The test now reads the actual column width after `initSchema` and sizes its fixtures to match; the contract it pins (cosine ordering) is dimension-independent.
+
+To take advantage of v0.42.55.2: nothing to do — test-only change.
+
+### Fixed
+- **`facts-engine.test.ts` sizes vector fixtures from the real `facts.embedding` column** (via `pg_attribute.atttypmod`) instead of a hardcoded 1536, making the cosine-ordering test immune to cross-file gateway-state interleaving in sharded CI runs.
+
 ## [0.42.55.1] - 2026-07-21
 
 **CI: the gitleaks secret-scanning gate actually runs again.** The gitleaks job was failing on every PR because gitleaks-action requires a license key for organization-owned repos and the workflow never passed one. The `GITLEAKS_LICENSE` repo secret is now wired into the job's environment.
