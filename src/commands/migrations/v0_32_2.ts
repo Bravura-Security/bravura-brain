@@ -124,6 +124,7 @@ interface PhaseBOutcome {
   fenced: number;
   skipped_no_entity: number;
   skipped_no_local_path: number;
+  skipped_checkout_missing: number;
   pages_touched: number;
   failed_pages: string[];
 }
@@ -151,7 +152,7 @@ function isLocalPathDirty(localPath: string): boolean {
 async function phaseBFenceFacts(
   engine: BrainEngine | null,
   opts: OrchestratorOpts,
-): Promise<OrchestratorPhaseResult> {
+): Promise<OrchestratorPhaseResult & { deferred?: number }> {
   if (opts.dryRun) {
     // Dry-run: report what WOULD happen without touching FS or DB.
     if (!engine) return { name: 'fence_facts', status: 'skipped', detail: 'no_brain_configured' };
@@ -186,6 +187,24 @@ async function phaseBFenceFacts(
     const localPathById = new Map<string, string | null>();
     for (const s of sources) localPathById.set(s.id, s.local_path);
 
+    // A source's local_path may be materialized on a different host than the
+    // one running migrations (e.g. the checkout lives in another pod of the
+    // same deployment). Fencing those rows here would either fail every page
+    // or — worse — write into a filesystem the checkout never sees while the
+    // DB rows get marked fenced. Defer instead: skip the source now, report
+    // partial, and let a run from a host that has the checkout finish the job.
+    const deferredSources = new Set<string>();
+    for (const [id, localPath] of localPathById) {
+      if (localPath && !existsSync(localPath)) {
+        deferredSources.add(id);
+        localPathById.set(id, null);
+        console.log(
+          `  Note: source "${id}" local_path ${localPath} does not exist in this environment; ` +
+          `deferring its fence backfill. Re-run \`gbrain apply-migrations --yes\` from a host with the checkout.`,
+        );
+      }
+    }
+
     // Dirty-tree refusal: check every source's local_path before writing.
     for (const [id, localPath] of localPathById) {
       if (localPath && isLocalPathDirty(localPath)) {
@@ -212,6 +231,7 @@ async function phaseBFenceFacts(
       fenced: 0,
       skipped_no_entity: 0,
       skipped_no_local_path: 0,
+      skipped_checkout_missing: 0,
       pages_touched: 0,
       failed_pages: [],
     };
@@ -226,7 +246,8 @@ async function phaseBFenceFacts(
       }
       const localPath = localPathById.get(row.source_id);
       if (!localPath) {
-        outcome.skipped_no_local_path += 1;
+        if (deferredSources.has(row.source_id)) outcome.skipped_checkout_missing += 1;
+        else outcome.skipped_no_local_path += 1;
         continue;
       }
       const key = `${row.source_id}\0${row.entity_slug}`;
@@ -335,6 +356,7 @@ async function phaseBFenceFacts(
     const detail = `scanned=${outcome.scanned} fenced=${outcome.fenced} ` +
       `pages=${outcome.pages_touched} skipped_no_entity=${outcome.skipped_no_entity} ` +
       `skipped_no_local_path=${outcome.skipped_no_local_path}` +
+      (outcome.skipped_checkout_missing > 0 ? ` deferred_checkout_missing=${outcome.skipped_checkout_missing}` : '') +
       (outcome.failed_pages.length > 0 ? ` failed=${outcome.failed_pages.length}` : '');
 
     if (outcome.failed_pages.length > 0) {
@@ -344,7 +366,7 @@ async function phaseBFenceFacts(
         detail: `${detail} :: ${outcome.failed_pages.slice(0, 3).join(' | ')}${outcome.failed_pages.length > 3 ? '...' : ''}`,
       };
     }
-    return { name: 'fence_facts', status: 'complete', detail };
+    return { name: 'fence_facts', status: 'complete', detail, deferred: outcome.skipped_checkout_missing };
   } catch (e) {
     return { name: 'fence_facts', status: 'failed', detail: e instanceof Error ? e.message : String(e) };
   }
@@ -377,10 +399,18 @@ async function phaseCVerify(
 
     const mismatches: string[] = [];
     let pagesChecked = 0;
+    let unverifiable = 0;
 
     for (const g of groups) {
       const localPath = localPathById.get(g.source_id);
       if (!localPath) continue;
+      if (!existsSync(localPath)) {
+        // Checkout materialized on a different host — a missing file here is
+        // an environment limitation, not fence drift. Verify from a host that
+        // has the checkout.
+        unverifiable += 1;
+        continue;
+      }
       const filePath = join(localPath, `${g.source_markdown_slug}.md`);
       if (!existsSync(filePath)) {
         mismatches.push(`${g.source_markdown_slug} (file missing)`);
@@ -403,7 +433,12 @@ async function phaseCVerify(
         detail: `${mismatches.length} pages drifted: ${mismatches.slice(0, 3).join(' | ')}${mismatches.length > 3 ? '...' : ''}`,
       };
     }
-    return { name: 'verify', status: 'complete', detail: `pages_checked=${pagesChecked}` };
+    return {
+      name: 'verify',
+      status: 'complete',
+      detail: `pages_checked=${pagesChecked}` +
+        (unverifiable > 0 ? ` unverifiable_checkout_missing=${unverifiable}` : ''),
+    };
   } catch (e) {
     return { name: 'verify', status: 'failed', detail: e instanceof Error ? e.message : String(e) };
   }
@@ -431,8 +466,11 @@ async function orchestrator(opts: OrchestratorOpts): Promise<OrchestratorResult>
   const c = await phaseCVerify(engine, opts);
   phases.push(c);
 
+  // Deferred fence rows (checkout not present on this host) leave real work
+  // outstanding — report partial so a later run from the right host finishes,
+  // while the boot path (exit 0 on partial) still lets the server start.
   const overallStatus: 'complete' | 'partial' | 'failed' =
-    c.status === 'failed' ? 'partial' : 'complete';
+    c.status === 'failed' || (b.deferred ?? 0) > 0 ? 'partial' : 'complete';
 
   return finalizeResult(phases, overallStatus, engine);
 }

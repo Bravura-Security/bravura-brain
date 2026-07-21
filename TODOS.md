@@ -1,5 +1,24 @@
 # TODOS
 
+## split-topology migration follow-ups (filed v0.42.55.0)
+
+Follow-up from v0.42.55.0's fix for the v0.32.2 boot crash-loop: fencing is now
+deferred (status `partial`) when a source's checkout isn't materialized on the
+host running migrations, but the deferred work still needs a home.
+
+- [ ] **P2 — Run deferred fence backfills from the hosts that own the checkouts.**
+  In split deployments each source's `local_path` is only visible to its own
+  sync/autopilot pod, so no single migration run can fence every source. Either
+  document the per-pod `gbrain apply-migrations --yes` runbook, or teach the
+  sync/autopilot path to fence its own source's legacy rows opportunistically
+  (it already holds the checkout and the git push channel). Where:
+  `src/commands/migrations/v0_32_2.ts`, `src/commands/sync.ts`, deploy templates.
+- [ ] **P3 — Boot-time migration ledger is ephemeral in container deployments.**
+  `~/.gbrain/completed.jsonl` lives in the pod filesystem, so every pod restart
+  re-runs the whole orchestrator chain (harmless but noisy, and the wedged-cap
+  never engages across restarts). Consider persisting the ledger in the DB next
+  to the schema version. Where: `src/commands/apply-migrations.ts`.
+
 ## reliability fix-wave follow-ups (filed v0.42.52.0)
 
 Deferred from the autopilot/supervisor + sync/status/minion reliability wave
