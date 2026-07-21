@@ -2,6 +2,15 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.56.1] - 2026-07-21
+
+**`reconcile-links` and `reconcile-fences` are actually invokable.** Both commands had their implementation in the CLI's command switch but were missing from the recognition set that gates dispatch, so `gbrain reconcile-links` (since its v0.20.0 gate refactor) and the new `gbrain reconcile-fences` answered "Unknown command". A source-scan pin now keeps a command's case and its recognition entry shipping together.
+
+To take advantage of v0.42.56.1: nothing to do — the commands now run as documented.
+
+### Fixed
+- **`reconcile-links` + `reconcile-fences` added to the CLI command recognition set** (both had unreachable dispatch cases); pinned by `test/cli-only-dispatch-pin.test.ts`.
+
 ## [0.42.56.0] - 2026-07-21
 
 **Fence-drift verification stops crying wolf, and real drift gets a repair path.** The v0.32.2 verify phase counted every facts row with a `row_num` — including the negative keyspace frontmatter promotion uses for rows that are deliberately NOT rendered into a `## Facts` fence. On any brain using frontmatter promotion, verify reported every promoted page as drifted (`fence=0, db=N`), burying the signal. Verify now checks fence-owned rows only. For drift that IS real — fence writes that landed on a filesystem the source checkout never sees, e.g. an ephemeral pod clone — the new `gbrain reconcile-fences` command re-materializes the missing fence rows from the DB (row_nums preserved, hand-edits and disk-ahead rows untouched, conflicts reported rather than overwritten), and a new `facts_fence_drift` doctor check keeps the class visible.
