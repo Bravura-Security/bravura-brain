@@ -2,6 +2,15 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.55.1] - 2026-07-21
+
+**CI: the gitleaks secret-scanning gate actually runs again.** The gitleaks job was failing on every PR because gitleaks-action requires a license key for organization-owned repos and the workflow never passed one. The `GITLEAKS_LICENSE` repo secret is now wired into the job's environment.
+
+To take advantage of v0.42.55.1: nothing to do — CI-only change.
+
+### Fixed
+- **`test.yml` gitleaks job passes `GITLEAKS_LICENSE`** from repo secrets to gitleaks-action, un-redding the secret-scanning check for this org-owned repo.
+
 ## [0.42.55.0] - 2026-07-20
 
 **Boot no longer wedges when a source's checkout lives on another host.** Migration v0.32.2's fact-fencing backfill assumed every source's `local_path` is visible to the process running migrations. In split deployments — the server runs boot-time migrations in one pod while source checkouts are materialized in sync/autopilot pods — every fence write failed and the migrate step exited non-zero on each boot, crash-looping the server. Fencing for a source whose checkout directory doesn't exist on the current host is now deferred instead of fatal: the migration reports `partial`, boot continues, and a later `gbrain apply-migrations --yes` from a host that has the checkout finishes the backfill.
