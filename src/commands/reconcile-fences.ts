@@ -56,6 +56,7 @@ import {
 import { serializeMarkdown } from '../core/markdown.ts';
 import { withPageLock } from '../core/page-lock.ts';
 import { createProgress } from '../core/progress.ts';
+import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 
 // ── Types ───────────────────────────────────────────────────
@@ -494,7 +495,7 @@ export async function runReconcileFencesCli(engine: BrainEngine, args: string[])
 
   if (jsonOut) {
     console.log(JSON.stringify(result));
-    if (result.status === 'dirty_tree' || result.failedPages.length > 0) process.exitCode = 1;
+    if (result.status === 'dirty_tree' || result.failedPages.length > 0) setCliExitVerdict(1);
     return;
   }
 
@@ -503,7 +504,7 @@ export async function runReconcileFencesCli(engine: BrainEngine, args: string[])
       `reconcile-fences: refusing to write — ${result.dirtySource} has uncommitted changes. ` +
       `Commit or stash, then re-run (or pass --allow-dirty if a sync sidecar owns the commit loop).`,
     );
-    process.exitCode = 1;
+    setCliExitVerdict(1);
     return;
   }
 
@@ -531,5 +532,5 @@ export async function runReconcileFencesCli(engine: BrainEngine, args: string[])
   for (const f of result.failedPages.slice(0, 10)) {
     console.log(`  FAILED ${f}`);
   }
-  if (result.failedPages.length > 0) process.exitCode = 1;
+  if (result.failedPages.length > 0) setCliExitVerdict(1);
 }
