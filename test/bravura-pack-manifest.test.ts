@@ -50,9 +50,11 @@ describe('gbrain-bravura company-brain pack', () => {
       'product_area',
       'responsive_qa',
       'rfp',
+      'services_project', // v1.6 — services slice
       'support_case',
       'support_pattern',
       'team',
+      'work_package', // v1.6 — services slice
     ]);
   });
 
@@ -236,9 +238,64 @@ describe('gbrain-bravura company-brain pack', () => {
       'process',
       'product_area',
       'rfp',
+      'services_project', // v1.6 — services slice
       'support_case',
       'support_pattern',
       'team',
+      'work_package', // v1.6 — services slice
     ]);
+  });
+
+  test('v1.6: services_project + work_package type the services/ prefixes and are extractable', () => {
+    const byName = new Map(pack.page_types.map((t) => [t.name, t]));
+    const proj = byName.get('services_project')!;
+    expect(proj.primitive).toBe('temporal');
+    expect(proj.path_prefixes).toEqual(['services/projects/']);
+    expect(proj.extractable).toBe(true);
+
+    const wp = byName.get('work_package')!;
+    expect(wp.primitive).toBe('concept');
+    expect(wp.path_prefixes).toEqual(['services/work-packages/']);
+    expect(wp.extractable).toBe(true);
+  });
+
+  test('v1.6: services link verbs declared with inverses', () => {
+    const byName = new Map((pack.link_types ?? []).map((l) => [l.name, l]));
+    expect(byName.get('comprises')?.inverse).toBe('part_of');
+    expect(byName.get('similar_to')?.inverse).toBe('comparable_to');
+    expect(byName.get('staffed_by')?.inverse).toBe('staffed_on');
+  });
+
+  test('v1.6: work_package observed_in is an INCOMING comprises edge from services/projects/', () => {
+    // The edge must read project --comprises--> work_package no matter which
+    // side authored the frontmatter, so the work_package rule declares
+    // direction: incoming rather than a second verb.
+    const fl = (pack.frontmatter_links ?? []).find(
+      (l) => l.page_type === 'work_package' && l.fields.includes('observed_in'),
+    );
+    expect(fl?.link_type).toBe('comprises');
+    expect(fl?.direction).toBe('incoming');
+    expect(fl?.target_dirs).toEqual(['services/projects/']);
+  });
+
+  test('v1.6: services_project comprises + similar_to resolve prefix-scoped', () => {
+    const byField = (field: string) =>
+      (pack.frontmatter_links ?? []).find(
+        (fl) => fl.page_type === 'services_project' && fl.fields.includes(field),
+      );
+    expect(byField('comprises')?.target_dirs).toEqual(['services/work-packages/']);
+    expect(byField('similar_to')?.target_dirs).toEqual(['services/projects/']);
+    expect(byField('staffed_by')?.link_type).toBe('staffed_by');
+    expect(byField('for_customer')?.link_type).toBe('for_customer');
+  });
+
+  test('v1.6: safety retypes rescue services/ pages stored as concept pre-deploy', () => {
+    const retypes = (pack.mapping_rules ?? []).filter((r) => r.kind === 'retype');
+    const proj = retypes.find((r) => r.to_type === 'services_project');
+    expect(proj?.from_type).toBe('concept');
+    expect(proj?.path_filter).toBe('services/projects/%');
+    const wp = retypes.find((r) => r.to_type === 'work_package');
+    expect(wp?.from_type).toBe('concept');
+    expect(wp?.path_filter).toBe('services/work-packages/%');
   });
 });

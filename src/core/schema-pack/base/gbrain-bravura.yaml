@@ -5,7 +5,11 @@
 # and INTERNAL knowledge. The taxonomy is designed to hold all three; the
 # first build slice populated INTERNAL + SUPPORT. v1.4 opens the sales slice:
 # `deal` pages (Salesforce opportunities, ingested DB-direct by brain-ingest
-# under sales/opportunities/) are live; `rfp` remains stubbed.
+# under sales/opportunities/) are live; `rfp` remains stubbed. v1.6 opens the
+# SERVICES slice: `services_project` (one page per P-number engagement) and
+# `work_package` (cross-project effort norms per estimate deliverable), so that
+# estimates and SOWs can be grounded in the effort, scope and outcome of past
+# delivered projects.
 #
 # Activate:  gbrain schema use gbrain-bravura
 #
@@ -21,10 +25,10 @@
 
 api_version: gbrain-schema-pack-v1
 name: gbrain-bravura
-version: 1.5.1
+version: 1.6.0
 gbrain_min_version: 0.39.0
 extends: gbrain-recommended
-description: "Bravura Security unified company brain. Spans support (cases, patterns, KB), internal knowledge (concepts, processes, products, people, teams), and sales (deals live via Salesforce opportunities; RFPs stubbed). Two-layer compiled-truth pages authored by the nightly enrich agent from raw inbox signals; reference content (Paligo / Confluence-KB / SF-KB / Responsive / opportunities) ingested DB-direct."
+description: "Bravura Security unified company brain. Spans support (cases, patterns, KB), internal knowledge (concepts, processes, products, people, teams), sales (deals live via Salesforce opportunities; RFPs stubbed), and professional services (services_project engagements keyed by SOW/P-number, work_package effort norms). Two-layer compiled-truth pages authored by the nightly enrich agent from raw inbox signals; reference content (Paligo / Confluence-KB / SF-KB / Responsive / opportunities) ingested DB-direct."
 
 # Borrow the base entity types this pack's filing rules + links reference.
 # borrow_from signals intent; the registry already merges types via extends.
@@ -169,6 +173,33 @@ page_types:
     extractable: false
     expert_routing: false
 
+  # ---- Professional services (v1.6) ----
+  - name: services_project
+    primitive: temporal
+    path_prefixes:
+      - services/projects/
+    aliases: []
+    # One page per delivered (or estimated) services engagement, keyed by its
+    # SOW / P-number. The richest fact source in the services slice: effort
+    # days by deliverable and resource, complexity parameters, delivery model,
+    # commercial terms, and outcome. extract_facts mines these as the concrete
+    # proof points that new estimates and SOWs are grounded in.
+    extractable: true
+    expert_routing: false
+
+  - name: work_package
+    primitive: concept
+    path_prefixes:
+      - services/work-packages/
+    aliases: []
+    # A canonical estimate deliverable ("Discovery and Design", "Customization
+    # Migration") with its effort distribution observed across projects, its
+    # standard sub-task library, and its reusable SOW language. Exactly the
+    # support_case -> support_pattern relationship, one slice over: many
+    # services_project pages distil into one work_package norm.
+    extractable: true
+    expert_routing: false
+
   # ---- Connector reference types (v1.1 — adopt what connectors actually stamp) ----
   # These three types are stamped by brain-ingest transformers and land in the
   # company source under the origin-namespaced slug prefixes shown below.
@@ -247,6 +278,22 @@ link_types:
   - name: works_on
     inverse: worked_on_by
 
+  # v1.6 — services slice verbs.
+  # comprises: services_project -> work_package (which deliverables it contained).
+  # The inverse (part_of) is how a work_package enumerates its evidence base, so
+  # work_package rules below map their field with direction: incoming.
+  - name: comprises
+    inverse: part_of
+  # similar_to: services_project -> services_project. The estimating workhorse:
+  # "which past engagement is this new one most like". Asymmetric on purpose —
+  # the estimator asserts the comparison in one direction.
+  - name: similar_to
+    inverse: comparable_to
+  # staffed_by: services_project -> person. Who actually delivered it, which is
+  # what makes a proof point citable ("the architect who did this is available").
+  - name: staffed_by
+    inverse: staffed_on
+
 # Frontmatter field → link verb. Page-typed: the SOURCE page's type selects
 # which mapping applies. Direction is outgoing (page → resolved target)
 # unless `direction: incoming` is declared.
@@ -310,6 +357,41 @@ frontmatter_links:
     link_type: owned_by
     target_dirs: [people/, teams/]
 
+  # v1.6 — services slice. services_project pages are authored with slug-form
+  # values (services/work-packages/..., customers/...), which resolve exact-only.
+  - page_type: services_project
+    fields: [customer, account, for_customer]
+    link_type: for_customer
+    target_dirs: [customers/]
+  - page_type: services_project
+    fields: [product, product_area, affects_product]
+    link_type: affects_product
+    target_dirs: [products/]
+  - page_type: services_project
+    fields: [work_packages, comprises]
+    link_type: comprises
+    target_dirs: [services/work-packages/]
+  - page_type: services_project
+    fields: [similar_to]
+    link_type: similar_to
+    target_dirs: [services/projects/]
+  - page_type: services_project
+    fields: [staffed_by, delivered_by, project_manager, solution_architect]
+    link_type: staffed_by
+    target_dirs: [people/]
+  # A work_package's evidence base: the projects it was observed in. Declared
+  # incoming so the edge reads project --comprises--> work_package regardless of
+  # which side authored it.
+  - page_type: work_package
+    fields: [observed_in, part_of]
+    link_type: comprises
+    direction: incoming
+    target_dirs: [services/projects/]
+  - page_type: work_package
+    fields: [product, product_area, affects_product]
+    link_type: affects_product
+    target_dirs: [products/]
+
 # Fact extraction is on for support_case / support_pattern / product_area /
 # process via their extractable flag above; no override block needed.
 enrichable_types: []
@@ -364,6 +446,18 @@ filing_rules:
     examples:
       - sales/rfp/acme-security-questionnaire-2026
     description: "STUB (sales slice). Security questionnaires / RFP responses from Responsive. Populated when the sales slice is built."
+  - kind: services_project
+    directory: services/projects/
+    examples:
+      - services/projects/p-76402-appalachian-state-identity-12-9-upgrade
+      - services/projects/p-75002-icbc-standard-privilege-12-8-onprem-upgrade
+    description: "One page per services engagement, slugged by its SOW / P-number: services/projects/p-<number>-<customer>-<scope>. Two-layer: compiled truth (what was estimated, what was delivered, why it is a useful proof point, effort tables, reusable scope and terms, open questions) above the line, append-only timeline below. Frontmatter carries the estimating parameters (complexity, environments, availability, contingency_pct), the effort and price totals, delivery_model, billing_type, and outcome. Links: for_customer, affects_product, comprises, similar_to, staffed_by. NEVER infer effort, price or outcome — leave the field 'unknown' and say so in Open questions."
+  - kind: work_package
+    directory: services/work-packages/
+    examples:
+      - services/work-packages/discovery-and-design
+      - services/work-packages/customization-migration
+    description: "Canonical estimate deliverables distilled across many services_project pages: standard sub-task library, observed effort distribution by scope_type x complexity, reusable SOW language, and an explicit Confidence section stating the observation count. The services analogue of support/patterns/. Frontmatter: observed_in (-> comprises, incoming), observation_count, observed_effort_days_min/median/max. Do not present a template default as an observed norm."
 
 # v1.1 — mapping_rules for unify-types normalization pass.
 # These retype rules let 'gbrain schema apply-mutations' recognize the 11,664
@@ -402,3 +496,19 @@ mapping_rules:
     subtype_field: origin
     subtype: confluence
     path_filter: confluence/%
+
+  # v1.6 — safety retype for the services slice. If any page lands under
+  # services/ before the v1.6 image is live, inferTypeFromPack finds no matching
+  # prefix and stores it as the default 'concept' (this is exactly what happened
+  # to the confluence/ pages before v1.5). path_filter scopes each retype to its
+  # slug namespace so real concept pages are untouched. Harmless no-op if the
+  # pack was deployed before any services page was written.
+  - kind: retype
+    from_type: concept
+    to_type: services_project
+    path_filter: services/projects/%
+
+  - kind: retype
+    from_type: concept
+    to_type: work_package
+    path_filter: services/work-packages/%
