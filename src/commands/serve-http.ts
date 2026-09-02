@@ -44,6 +44,10 @@ import {
   type IngestionEvent,
 } from '../core/ingestion/types.ts';
 import { resolveOidcRpConfig, createOidcRp, OidcRpError, type OidcRp } from '../core/oidc-rp.ts';
+// decodeJwt is used ONLY to pull a triage subject hint out of an assertion that
+// already failed verification — never for authorization. See the cf-access
+// rejection log in dualModeAuth.
+import { decodeJwt } from 'jose';
 import {
   CF_ACCESS_JWT_HEADER,
   resolveCfAccessConfig,
@@ -1550,6 +1554,33 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       // Fail closed: a present-but-invalid assertion is a 401, NOT a
       // fall-through to bearer or anon.
       const code = e instanceof CfAccessVerifyError ? e.code : 'malformed';
+      // LOG THE REJECTION. Without this line a failed human login is completely
+      // invisible: gbrain has no 401 logging anywhere, and mcp_request_log only
+      // records tools/list + tools/call, so a user who never authenticates
+      // leaves no trace on this side at all. "No log lines" was being read as
+      // "no failed logins", which is not something this server can attest to.
+      // The `code` is the discriminator worth having — missing_email and
+      // invalid_audience have completely different owners (IdP claim mapping vs
+      // the Access app AUD), and guessing between them costs hours.
+      //
+      // `subjectHint` is decoded WITHOUT verification purely for triage — the
+      // assertion just failed to verify, so nothing in it is trustworthy and it
+      // must never be used for authorization. Emails are not secrets and this is
+      // the only way to answer "which user is affected?". The raw JWT is never
+      // logged.
+      let subjectHint = 'unknown';
+      try {
+        const unverified = decodeJwt(assertion) as Record<string, unknown>;
+        const email = unverified.email;
+        if (typeof email === 'string' && email.length > 0) subjectHint = email.toLowerCase();
+      } catch {
+        // A JWT too malformed to even decode — 'unknown' is the honest answer.
+      }
+      console.error(
+        `[cf-access] REJECTED code=${code} subject=${subjectHint} ` +
+          `aud=${cfAccessConfig.aud.slice(0, 8)}… team=${cfAccessConfig.teamDomain} ` +
+          `detail=${e instanceof Error ? e.message : String(e)}`,
+      );
       res.status(401).json({
         error: 'invalid_cf_access_jwt',
         error_description: `Cloudflare Access JWT rejected (${code})`,
